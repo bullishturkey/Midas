@@ -555,7 +555,17 @@ async def on_message(message: discord.Message):
 
     # ── Alert channel — execute trades ────────────────────────────────────────
     if message.channel.id == ALERT_CHANNEL_ID:
-        ndx_price = parse_ndx_price(message.content)
+        # Check both message content and embeds for NDX price
+        content_to_parse = message.content or ''
+        if not content_to_parse and message.embeds:
+            for embed in message.embeds:
+                parts = []
+                if embed.title: parts.append(embed.title)
+                if embed.description: parts.append(embed.description)
+                for field in embed.fields:
+                    parts.append(f"{field.name} {field.value}")
+                content_to_parse = chr(10).join(parts)
+        ndx_price = parse_ndx_price(content_to_parse)
         if not ndx_price:
             return
 
