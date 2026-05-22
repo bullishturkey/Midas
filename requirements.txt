@@ -4,3 +4,4 @@ python-dotenv==1.2.2
 aiohttp==3.13.5
 groq
 yfinance
+anthropic
