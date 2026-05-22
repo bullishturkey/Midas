@@ -29,7 +29,7 @@ from decimal import Decimal
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-from groq import Groq
+import anthropic
 import yfinance as yf
 
 from alerts_command import AlertsCommandClient
@@ -49,19 +49,19 @@ ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID", "0"))
 BOT_CHANNEL_ID   = int(os.getenv("BOT_CHANNEL_ID", "0"))
 TRADER_ROLE_NAME = os.getenv("TRADER_ROLE_NAME", "Midas Trader")
 PAPER_TRADING    = os.getenv("PAPER_TRADING", "true").lower() == "true"
-GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("Mida_brain_API_KEY")
 
 UNDERLYING      = "NDX"
 STRIKE_INTERVAL = 10
 SPREAD_WIDTH    = 10
 DEFAULT_LIMIT   = 5.00
 
-# ── Groq Setup ─────────────────────────────────────────────────────────────────
-groq_client = Groq(api_key=GROQ_API_KEY)
+# ── Anthropic Setup ────────────────────────────────────────────────────────────
+anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ── Alerts Command ─────────────────────────────────────────────────────────────
 ac = AlertsCommandClient(
-    base_url=os.getenv("ALERTS_COMMAND_URL", "https://alert-refresh.preview.emergentagent.com/api"),
+    base_url=os.getenv("ALERTS_COMMAND_URL", "https://alert-command-app.onrender.com/api"),
     api_key=os.getenv("ALERTS_COMMAND_KEY"),
 )
 
@@ -187,14 +187,18 @@ Be conversational, not robotic. No unnecessary bullet lists. Keep it real. Alway
 
         messages.append({"role": "user", "content": user_message})
 
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
+        # Strip system message — Anthropic takes it separately
+        system_msg = messages[0]['content'] if messages[0]['role'] == 'system' else system_prompt
+        user_messages = [m for m in messages if m['role'] != 'system']
+
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-20250514",
             max_tokens=1024,
-            temperature=0.7,
+            system=system_msg,
+            messages=user_messages,
         )
 
-        reply = response.choices[0].message.content
+        reply = response.content[0].text
 
         if not is_public:
             conversation_history[user_id].append({"role": "user",      "content": user_message})
@@ -203,7 +207,7 @@ Be conversational, not robotic. No unnecessary bullet lists. Keep it real. Alway
         return reply
 
     except Exception as e:
-        log.error("Groq error: %s", e)
+        log.error("Anthropic error: %s", e)
         return "I'm having a connection issue right now. Try again in a moment."
 
 
