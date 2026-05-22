@@ -49,7 +49,7 @@ ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID", "0"))
 BOT_CHANNEL_ID   = int(os.getenv("BOT_CHANNEL_ID", "0"))
 TRADER_ROLE_NAME = os.getenv("TRADER_ROLE_NAME", "Midas Trader")
 PAPER_TRADING    = os.getenv("PAPER_TRADING", "true").lower() == "true"
-ANTHROPIC_API_KEY = os.getenv("Midas_Brain_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("Mida_brain_API_KEY")
 
 UNDERLYING      = "NDX"
 STRIKE_INTERVAL = 10
@@ -192,7 +192,7 @@ Be conversational, not robotic. No unnecessary bullet lists. Keep it real. Alway
         user_messages = [m for m in messages if m['role'] != 'system']
 
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-20250514",
             max_tokens=1024,
             system=system_msg,
             messages=user_messages,
@@ -249,7 +249,7 @@ class UserTradeExecutor:
         from tastytrade import Session
         from tastytrade.account import Account
         self.session = Session(
-            client_secret=self.tt_secret,
+            provider_secret=self.tt_secret,
             refresh_token=self.tt_refresh,
             is_test=PAPER_TRADING,
         )
