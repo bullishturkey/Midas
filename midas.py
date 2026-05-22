@@ -125,7 +125,8 @@ def get_contract_count(balance: float) -> int:
 
 
 def calculate_strikes(ndx_price: float) -> tuple:
-    short = int(math.floor(ndx_price / STRIKE_INTERVAL) * STRIKE_INTERVAL)
+    rounded = int(math.floor(ndx_price / STRIKE_INTERVAL) * STRIKE_INTERVAL)
+    short = rounded + STRIKE_INTERVAL
     return short, short - SPREAD_WIDTH
 
 
