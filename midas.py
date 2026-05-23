@@ -52,6 +52,9 @@ PAPER_TRADING    = os.getenv("PAPER_TRADING", "true").lower() == "true"
 ANTHROPIC_API_KEY = os.getenv("Midas_Brain_API_KEY")
 
 UNDERLYING      = "NDX"
+ADMIN_DISCORD_ID     = int(os.getenv("ADMIN_DISCORD_ID", "1051881555909427241"))
+MILESTONE_CHANNEL_ID = int(os.getenv("MILESTONE_CHANNEL_ID", "1504190249449029692"))
+_milestone_tracker: dict = {}  # user_id -> last milestone notified (in thousands)
 STRIKE_INTERVAL = 10
 SPREAD_WIDTH    = 10
 DEFAULT_LIMIT   = 5.00
@@ -142,6 +145,8 @@ async def ask_groq(
     subscriber_info: dict = None,
     market_data: dict = None,
     is_public: bool = False,
+    image_data: bytes = None,
+    image_media_type: str = None,
 ) -> str:
 
     market_str = ""
@@ -162,18 +167,38 @@ async def ask_groq(
             f"Tastytrade: {'Connected' if subscriber_info.get('tastytrade_client_secret') else 'Not Connected'}"
         )
 
-    system_prompt = f"""You are Midas, an AI market intelligence assistant for an exclusive NDX options trading group. You are sharp, data-driven, and direct.
+    is_admin = subscriber_info.get("is_admin", False) if subscriber_info else False
 
-Your role is to provide real market data, sentiment analysis, and factual interpretation of market conditions. You do NOT give trade ideas, trade recommendations, or encourage anyone to make any specific trade. If asked whether to trade or what to trade, decline clearly and redirect to data.
+    system_prompt = f"""You are Midas — the AI market intelligence brain for an elite NDX 0DTE options trading group. You are sharp, data-driven, direct, and deeply knowledgeable.
 
-You can discuss: current market levels, VIX sentiment, NDX price action, implied volatility, macroeconomic data, Fed policy, earnings reports, sector strength, market news, and general options education (explaining what things mean, not what to do).
+## Your personality
+You are confident but never arrogant. You speak like a seasoned trader who has seen everything — calm under pressure, precise with data, and genuinely helpful. You never hype, never fear-monger. You lay out the facts and respect people's autonomy.
 
-You interpret data on the fly — if someone asks what a high VIX means for the market, you explain it factually. If someone asks if now is a good time to trade, you give them the data and let them decide. You never say "you should" or "I would" regarding a trade.
+## Your formatting rules (ALWAYS follow these)
+- Use **bold** to highlight key numbers, terms, and important phrases
+- Organize multi-point responses into clear sections with bold headers like **Market Overview**, **VIX Reading**, **What This Means**
+- Use bullet points (•) for lists of 3 or more items — never paragraph walls for lists
+- Keep responses focused — lead with the most important point
+- For education topics: break into sections (What It Is, How It Works, Key Terms, Example), use bullets, be thorough but scannable
+- For market updates: mirror the sentiment in the app (bullish/bearish/neutral) with supporting data
+- When you can elaborate on a topic, end with: *"Want me to go deeper on any of this?"*
+
+## What you can do
+- Provide real market data, NDX/VIX/SPX levels, sentiment analysis
+- Teach options trading concepts in depth — spreads, Greeks, IV, 0DTE, etc.
+- Break down trade screenshots or positions if someone shares one
+- Analyze market conditions and news
+- For admin: look up subscriber accounts, settings, trade history
+
+## What you never do
+- Never give direct trade recommendations ("you should buy/sell X")
+- Never share subscriber info with non-admins
+- Never share account credentials or tokens
+- Always end market interpretations with something like: *"That's the data — the call is yours."*
 {market_str}{sub_str}
 
-{"PUBLIC CHANNEL: Be concise. Data, sentiment, news only. No personal info." if is_public else "PRIVATE DM: Full conversation. Can discuss personal settings and account details but still no trade recommendations."}
-
-Be conversational, not robotic. No unnecessary bullet lists. Keep it real. Always end any market interpretation with something like 'that's the data — the decision is yours.'"""
+{"**ADMIN MODE** — Full access. You can discuss subscriber accounts, settings, and internal data when asked." if is_admin else "PUBLIC CHANNEL: Be concise. Data, sentiment, news only. No personal account info." if is_public else "PRIVATE DM: Full conversation. Can discuss personal settings. Education mode active."}
+"""
 
     try:
         # Build messages list
@@ -186,7 +211,13 @@ Be conversational, not robotic. No unnecessary bullet lists. Keep it real. Alway
             for msg in conversation_history[user_id][-16:]:
                 messages.append({"role": msg["role"], "content": msg["content"]})
 
-        messages.append({"role": "user", "content": user_message})
+        if image_data and image_media_type:
+            messages.append({"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": image_media_type, "data": __import__("base64").b64encode(image_data).decode()}},
+                {"type": "text", "text": user_message or "Please analyze this trade/chart and break it down for me."}
+            ]})
+        else:
+            messages.append({"role": "user", "content": user_message})
 
         # Strip system message — Anthropic takes it separately
         system_msg = messages[0]['content'] if messages[0]['role'] == 'system' else system_prompt
@@ -548,6 +579,26 @@ async def start_onboarding(member: discord.Member):
             pass
 
 
+async def check_milestone(discord_id: str, display_name: str, balance: float):
+    """Send notification when account hits milestone thresholds."""
+    milestone_channel = bot.get_channel(MILESTONE_CHANNEL_ID)
+    if not milestone_channel:
+        return
+    milestone_k = int(balance // 5000) * 5  # nearest 5k floor
+    if milestone_k < 5:
+        return
+    last = _milestone_tracker.get(discord_id, 0)
+    if milestone_k > last:
+        _milestone_tracker[discord_id] = milestone_k
+        mention = f"<@{discord_id}>" if discord_id else display_name
+        await milestone_channel.send(
+            f"🏆 **Account Milestone** — {mention}\n"
+            f"**{display_name}** just crossed **${milestone_k:,}** 🎉\n"
+            f"Current balance: **${balance:,.2f}**\n"
+            f"Keep stacking. 💰"
+        )
+
+
 @bot.event
 async def on_message(message: discord.Message):
     await bot.process_commands(message)
@@ -607,6 +658,9 @@ async def on_message(message: discord.Message):
                         f"Account: `{result['account']}` | Balance: `${result['balance']:,.2f}`"
                     )
                 await ac.log_trade(discord_id, display_name, result, ndx_price)
+                # Check for milestone
+                if discord_id and result.get("balance"):
+                    await check_milestone(discord_id, display_name, float(result["balance"]))
             else:
                 if bot_channel:
                     await bot_channel.send(f"⚠️ Trade failed for {mention}: `{result.get('error')}`")
@@ -658,7 +712,20 @@ async def on_message(message: discord.Message):
                 if ticker_data:
                     extra_context += f"\n[{ticker_data['symbol']}: ${ticker_data['price']} | High: ${ticker_data['high']} | Low: ${ticker_data['low']}]"
 
-            response = await ask_groq(extra_context, str(message.author.id), None, market_data, is_public=True)
+            # Check for image attachments in public channel
+            pub_image_data = None
+            pub_image_type = None
+            if message.attachments:
+                for att in message.attachments:
+                    if any(att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]):
+                        import aiohttp
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(att.url) as resp:
+                                if resp.status == 200:
+                                    pub_image_data = await resp.read()
+                                    pub_image_type = (att.content_type or "image/jpeg").split(";")[0].strip()
+                        break
+            response = await ask_groq(extra_context, str(message.author.id), None, market_data, is_public=True, image_data=pub_image_data, image_media_type=pub_image_type)
             chunks   = [response[i:i+1900] for i in range(0, len(response), 1900)]
             for i, chunk in enumerate(chunks):
                 prefix = "🟡 " if i == 0 else ""
@@ -755,8 +822,53 @@ async def handle_dm(message: discord.Message):
                 await user.send(f"🟡 Auto-trading is now **{status}**")
             return
 
+        # ── Admin subscriber lookup ────────────────────────────────────────────
+        if str(user.id) == str(ADMIN_DISCORD_ID):
+            admin_lookup = re.search(r"(?:look up|find|check|show me|pull up|account for)\s+(.+)", content, re.IGNORECASE)
+            if admin_lookup or "subscribers" in content.lower() or "all accounts" in content.lower():
+                subscribers = await ac.get_subscribers()
+                if "subscribers" in content.lower() or "all accounts" in content.lower():
+                    lines = [f"**{s.get('display_name','Unknown')}** — Balance: **${float(s.get('account_balance') or 0):,.2f}** | Auto: {'✅' if s.get('auto_trade') else '❌'} | Discord: `{s.get('discord_id','—')}`" for s in subscribers]
+                    summary = f"🟡 **All Subscribers ({len(subscribers)})**\n\n" + "\n".join(lines) if lines else "No subscribers found."
+                    await user.send(summary[:1900])
+                    return
+                elif admin_lookup:
+                    query = admin_lookup.group(1).lower().strip()
+                    matches = [s for s in subscribers if query in (s.get("display_name","") or "").lower() or query in (s.get("discord_id","") or "")]
+                    if matches:
+                        s = matches[0]
+                        await user.send(
+                            f"🟡 **Subscriber: {s.get('display_name','Unknown')}**\n"
+                            f"• Discord ID: `{s.get('discord_id','—')}`\n"
+                            f"• Balance: **${float(s.get('account_balance') or 0):,.2f}**\n"
+                            f"• Account #: `{s.get('account_number','—')}`\n"
+                            f"• Auto-Trade: {'✅ ON' if s.get('auto_trade') else '❌ OFF'}\n"
+                            f"• Limit Price: **${float(s.get('limit_price', 5)):,.2f}**\n"
+                            f"• Midas Enabled: {'✅' if s.get('midas_enabled') else '❌'}"
+                        )
+                    else:
+                        await user.send(f"No subscriber found matching `{query}`.")
+                    return
+
+        # ── Image/attachment handling ──────────────────────────────────────────
+        image_data = None
+        image_media_type = None
+        if message.attachments:
+            for att in message.attachments:
+                if any(att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]):
+                    import aiohttp
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(att.url) as resp:
+                            if resp.status == 200:
+                                image_data = await resp.read()
+                                ct = att.content_type or "image/jpeg"
+                                image_media_type = ct.split(";")[0].strip()
+                    break
+
         market_data = get_market_data()
-        response    = await ask_groq(content, discord_id, sub, market_data, is_public=False)
+        admin_sub = {"is_admin": True} if str(user.id) == str(ADMIN_DISCORD_ID) else None
+        effective_sub = admin_sub if admin_sub else sub
+        response    = await ask_groq(content, discord_id, effective_sub, market_data, is_public=False, image_data=image_data, image_media_type=image_media_type)
         chunks      = [response[i:i+1900] for i in range(0, len(response), 1900)]
         for i, chunk in enumerate(chunks):
             prefix = "🟡 " if i == 0 else ""
