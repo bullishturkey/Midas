@@ -193,7 +193,7 @@ Be conversational, not robotic. No unnecessary bullet lists. Keep it real. Alway
         user_messages = [m for m in messages if m['role'] != 'system']
 
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=1024,
             system=system_msg,
             messages=user_messages,
