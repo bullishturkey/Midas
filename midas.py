@@ -49,7 +49,7 @@ ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID", "0"))
 BOT_CHANNEL_ID   = int(os.getenv("BOT_CHANNEL_ID", "0"))
 TRADER_ROLE_NAME = os.getenv("TRADER_ROLE_NAME", "Midas Trader")
 PAPER_TRADING    = os.getenv("PAPER_TRADING", "true").lower() == "true"
-ANTHROPIC_API_KEY = os.getenv("Mida_brain_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("Midas_Brain_API_KEY")
 
 UNDERLYING      = "NDX"
 STRIKE_INTERVAL = 10
