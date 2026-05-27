@@ -683,6 +683,8 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
     if message.author == bot.user:
         return
+    if message.mention_everyone:
+        return
 
     # ── Alert channel — execute trades ────────────────────────────────────────
     if message.channel.id == ALERT_CHANNEL_ID:
