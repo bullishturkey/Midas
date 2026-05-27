@@ -606,20 +606,22 @@ async def performance(ctx):
     """Post the 2026 NDX performance update as an image."""
     import aiohttp, io
     page_url = "https://bullishturkey.github.io/midas-onboarding/performance.html"
-    screenshot_url = f"https://api.microlink.io/?url={page_url}&screenshot=true&meta=false&embed=screenshot.url&waitFor=1000&viewport.width=520&viewport.height=900"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(screenshot_url, timeout=aiohttp.ClientTimeout(total=30)) as r:
-            if r.status == 200:
-                img_url = (await r.json()).get("data", {}).get("screenshot", {}).get("url", "")
+    await ctx.send("Generating performance report...")
+    try:
+        screenshot_url = f"https://api.microlink.io/?url={page_url}&screenshot=true&meta=false&waitFor=2000&viewport.width=520&viewport.height=900"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(screenshot_url, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                data = await r.json()
+                img_url = data.get("data", {}).get("screenshot", {}).get("url", "")
                 if img_url:
-                    async with session.get(img_url) as img_r:
+                    async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=30)) as img_r:
                         img_bytes = await img_r.read()
                     file = discord.File(io.BytesIO(img_bytes), filename="performance.png")
                     await ctx.send("@everyone", file=file)
                 else:
-                    await ctx.send("Screenshot failed — view at: " + page_url)
-            else:
-                await ctx.send("Screenshot service unavailable — view at: " + page_url)
+                    await ctx.send(f"View performance report: {page_url}")
+    except Exception as e:
+        await ctx.send(f"Error generating image: {e}\nView at: {page_url}")
     try:
         await ctx.message.delete()
     except Exception:
