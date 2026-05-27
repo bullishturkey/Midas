@@ -601,10 +601,16 @@ async def check_milestone(discord_id: str, display_name: str, balance: float):
 
 
 
+_last_performance = 0
+
 @bot.command(name="performance")
 async def performance(ctx):
     """Post the 2026 NDX performance update as an image."""
-    import aiohttp, io
+    global _last_performance
+    import time, aiohttp, io
+    if time.time() - _last_performance < 30:
+        return
+    _last_performance = time.time()
     page_url = "https://bullishturkey.github.io/midas-onboarding/performance.html"
     try:
         screenshot_url = f"https://api.microlink.io/?url={page_url}&screenshot=true&meta=false&waitFor=2000&viewport.width=520&element=.embed"
