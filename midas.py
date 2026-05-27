@@ -599,84 +599,32 @@ async def check_milestone(discord_id: str, display_name: str, balance: float):
         )
 
 
+
 @bot.command(name="performance")
 async def performance(ctx):
     """Post the 2026 NDX performance update embed."""
-
     embed = discord.Embed(
-        title="📊 2026 Performance Update — NDX Vertical Spread Model",
-        description="Through May 27  ·  3 trades remaining this month",
+        title="\U0001f4ca 2026 Performance Update \u2014 NDX Vertical Spread Model",
+        description="Through May 27  \u00b7  3 trades remaining this month",
         color=0xD4AF37
     )
-
-    embed.add_field(name="Rules", value="`$500 / contract`  ·  `+1 contract per $5K after $7K`", inline=False)
-
-    embed.add_field(
-        name="Jan (+3)",
-        value="**$2K:** +$1,500 → $3,500
-**$5K:** +$3,000 → $8,000",
-        inline=True
-    )
-    embed.add_field(
-        name="Feb (+4)",
-        value="**$2K:** +$2,000 → $5,500
-**$5K:** +$4,000 → $12,000",
-        inline=True
-    )
-    embed.add_field(name="​", value="​", inline=True)
-
-    embed.add_field(
-        name="Mar (-2)",
-        value="**$2K:** -$1,000 → $4,500
-**$5K:** -$2,000 → $10,000",
-        inline=True
-    )
-    embed.add_field(
-        name="Apr (+5)",
-        value="**$2K:** +$2,500 → $7,000
-**$5K:** +$5,000 → $15,000",
-        inline=True
-    )
-    embed.add_field(name="​", value="​", inline=True)
-
-    embed.add_field(
-        name="May* (+3 so far)",
-        value="**$2K:** +$3,000 → $10,000 ✨ 2x
-**$5K:** +$4,500 → $19,500 ✨ 3x",
-        inline=False
-    )
-
-    embed.add_field(
-        name="$2K Start — Current Balance",
-        value="**$10,000**
-+$8,000 · +400%
-2 contracts active · Next bump → $15K",
-        inline=True
-    )
-    embed.add_field(
-        name="$5K Start — Current Balance",
-        value="**$19,500**
-+$14,500 · +290%
-3 contracts active · Next bump → $20K",
-        inline=True
-    )
-
-    embed.add_field(
-        name="⏳ 3 Trades Left in May — Full Close Potential",
-        value="$2K path (2 contracts) → **$13,000**
-$5K path (3 contracts) → **$24,000**",
-        inline=False
-    )
-
-    embed.set_footer(text="One losing month all year. Everything else has been execution. Stay locked in. 🎯")
-
+    embed.add_field(name="Rules", value="`$500 / contract`  \u00b7  `+1 contract per $5K after $7K`", inline=False)
+    embed.add_field(name="Jan (+3)", value="**$2K:** +$1,500 -> $3,500\n**$5K:** +$3,000 -> $8,000", inline=True)
+    embed.add_field(name="Feb (+4)", value="**$2K:** +$2,000 -> $5,500\n**$5K:** +$4,000 -> $12,000", inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+    embed.add_field(name="Mar (-2)", value="**$2K:** -$1,000 -> $4,500\n**$5K:** -$2,000 -> $10,000", inline=True)
+    embed.add_field(name="Apr (+5)", value="**$2K:** +$2,500 -> $7,000\n**$5K:** +$5,000 -> $15,000", inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+    embed.add_field(name="May* (+3 so far)", value="**$2K:** +$3,000 -> $10,000 \u2728 2x\n**$5K:** +$4,500 -> $19,500 \u2728 3x", inline=False)
+    embed.add_field(name="$2K Start \u2014 Balance", value="**$10,000**\n+$8,000 \u00b7 +400%\n2 contracts \u00b7 Next bump at $15K", inline=True)
+    embed.add_field(name="$5K Start \u2014 Balance", value="**$19,500**\n+$14,500 \u00b7 +290%\n3 contracts \u00b7 Next bump at $20K", inline=True)
+    embed.add_field(name="\u23f3 3 Trades Left in May", value="$2K path (2 contracts) -> **$13,000**\n$5K path (3 contracts) -> **$24,000**", inline=False)
+    embed.set_footer(text="One losing month all year. Everything else has been execution. Stay locked in. \U0001f3af")
     await ctx.send("@everyone", embed=embed)
-    # Delete the command message to keep channel clean
     try:
         await ctx.message.delete()
-    except:
+    except Exception:
         pass
-
 
 @bot.event
 async def on_message(message: discord.Message):
