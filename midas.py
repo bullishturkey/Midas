@@ -606,7 +606,6 @@ async def performance(ctx):
     """Post the 2026 NDX performance update as an image."""
     import aiohttp, io
     page_url = "https://bullishturkey.github.io/midas-onboarding/performance.html"
-    await ctx.send("Generating performance report...")
     try:
         screenshot_url = f"https://api.microlink.io/?url={page_url}&screenshot=true&meta=false&waitFor=2000&viewport.width=520&element=.embed"
         async with aiohttp.ClientSession() as session:
