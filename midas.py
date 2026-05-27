@@ -439,19 +439,19 @@ async def start_onboarding(member: discord.Member):
                 "Open your browser and go to:\n"
                 "```\nmy.tastytrade.com\n```\n"
                 "Then navigate to:\n"
-                "> **Manage** → **My profile** → **API**\n\n"
+                "> **Manage** -> **My profile** -> **API**\n\n"
                 "You'll see two options. Tap **OAuth application**."
             ),
             color=0x1a1a1a,
         )
         step1.add_field(
             name="📱 On Mobile",
-            value="Tap the ☰ menu (top left) → scroll to **My profile** → **API**",
+            value="Tap the ☰ menu (top left) -> scroll to **My profile** -> **API**",
             inline=False,
         )
         step1.add_field(
             name="💻 On Desktop",
-            value="Click **Manage** in the top nav → expand **My profile** → click **API**",
+            value="Click **Manage** in the top nav -> expand **My profile** -> click **API**",
             inline=False,
         )
         step1.set_footer(text="✅ Tap 'OAuth application' — not 'Manage OAuth grants'")
@@ -531,7 +531,7 @@ async def start_onboarding(member: discord.Member):
             ),
             inline=False,
         )
-        step4.set_footer(text="Alerts Command → Midas section → Connect Account")
+        step4.set_footer(text="Alerts Command -> Midas section -> Connect Account")
         await thread.send(embed=step4)
         await asyncio.sleep(1)
 
@@ -548,7 +548,7 @@ async def start_onboarding(member: discord.Member):
                 "> *\"change my limit to 4.50\"*\n"
                 "> *\"turn off auto trading\"*\n"
                 "> *\"what's NDX at right now?\"*\n\n"
-                "**To revoke access:** Tastytrade → Manage → API → Manage OAuth grants → delete Midas Bot."
+                "**To revoke access:** Tastytrade -> Manage -> API -> Manage OAuth grants -> delete Midas Bot."
             ),
             color=0xFFD700,
         )
@@ -572,7 +572,7 @@ async def start_onboarding(member: discord.Member):
         try:
             await member.send(
                 f"🟡 **Welcome to Midas, {member.display_name}!**\n\n"
-                f"Open **Alerts Command → Midas** and enter your Tastytrade OAuth credentials to get started. "
+                f"Open **Alerts Command -> Midas** and enter your Tastytrade OAuth credentials to get started. "
                 f"DM me if you need help."
             )
         except:
@@ -613,36 +613,36 @@ async def performance(ctx):
 
     embed.add_field(
         name="Jan (+3)",
-        value="**$2K:** +$1,500 → $3,500
-**$5K:** +$3,000 → $8,000",
+        value="**$2K:** +$1,500 -> $3,500
+**$5K:** +$3,000 -> $8,000",
         inline=True
     )
     embed.add_field(
         name="Feb (+4)",
-        value="**$2K:** +$2,000 → $5,500
-**$5K:** +$4,000 → $12,000",
+        value="**$2K:** +$2,000 -> $5,500
+**$5K:** +$4,000 -> $12,000",
         inline=True
     )
     embed.add_field(name="​", value="​", inline=True)
 
     embed.add_field(
         name="Mar (-2)",
-        value="**$2K:** -$1,000 → $4,500
-**$5K:** -$2,000 → $10,000",
+        value="**$2K:** -$1,000 -> $4,500
+**$5K:** -$2,000 -> $10,000",
         inline=True
     )
     embed.add_field(
         name="Apr (+5)",
-        value="**$2K:** +$2,500 → $7,000
-**$5K:** +$5,000 → $15,000",
+        value="**$2K:** +$2,500 -> $7,000
+**$5K:** +$5,000 -> $15,000",
         inline=True
     )
     embed.add_field(name="​", value="​", inline=True)
 
     embed.add_field(
         name="May* (+3 so far)",
-        value="**$2K:** +$3,000 → $10,000 ✨ 2x
-**$5K:** +$4,500 → $19,500 ✨ 3x",
+        value="**$2K:** +$3,000 -> $10,000 ✨ 2x
+**$5K:** +$4,500 -> $19,500 ✨ 3x",
         inline=False
     )
 
@@ -650,21 +650,21 @@ async def performance(ctx):
         name="$2K Start — Current Balance",
         value="**$10,000**
 +$8,000 · +400%
-2 contracts active · Next bump → $15K",
+2 contracts active · Next bump -> $15K",
         inline=True
     )
     embed.add_field(
         name="$5K Start — Current Balance",
         value="**$19,500**
 +$14,500 · +290%
-3 contracts active · Next bump → $20K",
+3 contracts active · Next bump -> $20K",
         inline=True
     )
 
     embed.add_field(
         name="⏳ 3 Trades Left in May — Full Close Potential",
-        value="$2K path (2 contracts) → **$13,000**
-$5K path (3 contracts) → **$24,000**",
+        value="$2K path (2 contracts) -> **$13,000**
+$5K path (3 contracts) -> **$24,000**",
         inline=False
     )
 
@@ -752,7 +752,7 @@ async def on_message(message: discord.Message):
             await message.reply("Ask me anything — market data, options education, NDX levels, news. 🟡")
             return
 
-        # Setup request in public channel → redirect to thread
+        # Setup request in public channel -> redirect to thread
         if is_setup_request(content):
             await message.reply(
                 f"{message.author.mention} — I'm creating your private setup thread in this channel now. "
@@ -761,7 +761,7 @@ async def on_message(message: discord.Message):
             await start_onboarding(message.author if isinstance(message.author, discord.Member) else get_member_from_dm(message.author))
             return
 
-        # Personal question → redirect to DM
+        # Personal question -> redirect to DM
         if is_personal_message(content):
             await message.reply(
                 f"{message.author.mention} — that's personal info. "
