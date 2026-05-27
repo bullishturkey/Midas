@@ -600,31 +600,31 @@ async def check_milestone(discord_id: str, display_name: str, balance: float):
 
 
 
+
 @bot.command(name="performance")
 async def performance(ctx):
-    """Post the 2026 NDX performance update embed."""
-    embed = discord.Embed(
-        title="\U0001f4ca 2026 Performance Update \u2014 NDX Vertical Spread Model",
-        description="Through May 27  \u00b7  3 trades remaining this month",
-        color=0xD4AF37
-    )
-    embed.add_field(name="Rules", value="`$500 / contract`  \u00b7  `+1 contract per $5K after $7K`", inline=False)
-    embed.add_field(name="Jan (+3)", value="**$2K:** +$1,500 -> $3,500\n**$5K:** +$3,000 -> $8,000", inline=True)
-    embed.add_field(name="Feb (+4)", value="**$2K:** +$2,000 -> $5,500\n**$5K:** +$4,000 -> $12,000", inline=True)
-    embed.add_field(name="\u200b", value="\u200b", inline=True)
-    embed.add_field(name="Mar (-2)", value="**$2K:** -$1,000 -> $4,500\n**$5K:** -$2,000 -> $10,000", inline=True)
-    embed.add_field(name="Apr (+5)", value="**$2K:** +$2,500 -> $7,000\n**$5K:** +$5,000 -> $15,000", inline=True)
-    embed.add_field(name="\u200b", value="\u200b", inline=True)
-    embed.add_field(name="May* (+3 so far)", value="**$2K:** +$3,000 -> $10,000 \u2728 2x\n**$5K:** +$4,500 -> $19,500 \u2728 3x", inline=False)
-    embed.add_field(name="$2K Start \u2014 Balance", value="**$10,000**\n+$8,000 \u00b7 +400%\n2 contracts \u00b7 Next bump at $15K", inline=True)
-    embed.add_field(name="$5K Start \u2014 Balance", value="**$19,500**\n+$14,500 \u00b7 +290%\n3 contracts \u00b7 Next bump at $20K", inline=True)
-    embed.add_field(name="\u23f3 3 Trades Left in May", value="$2K path (2 contracts) -> **$13,000**\n$5K path (3 contracts) -> **$24,000**", inline=False)
-    embed.set_footer(text="One losing month all year. Everything else has been execution. Stay locked in. \U0001f3af")
-    await ctx.send("@everyone", embed=embed)
+    """Post the 2026 NDX performance update as an image."""
+    import aiohttp, io
+    page_url = "https://bullishturkey.github.io/midas-onboarding/performance.html"
+    screenshot_url = f"https://api.microlink.io/?url={page_url}&screenshot=true&meta=false&embed=screenshot.url&waitFor=1000&viewport.width=520&viewport.height=900"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(screenshot_url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            if r.status == 200:
+                img_url = (await r.json()).get("data", {}).get("screenshot", {}).get("url", "")
+                if img_url:
+                    async with session.get(img_url) as img_r:
+                        img_bytes = await img_r.read()
+                    file = discord.File(io.BytesIO(img_bytes), filename="performance.png")
+                    await ctx.send("@everyone", file=file)
+                else:
+                    await ctx.send("Screenshot failed — view at: " + page_url)
+            else:
+                await ctx.send("Screenshot service unavailable — view at: " + page_url)
     try:
         await ctx.message.delete()
     except Exception:
         pass
+
 
 @bot.event
 async def on_message(message: discord.Message):
