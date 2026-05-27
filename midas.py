@@ -616,7 +616,7 @@ async def performance(ctx):
                     async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=30)) as img_r:
                         img_bytes = await img_r.read()
                     file = discord.File(io.BytesIO(img_bytes), filename="performance.png")
-                    await ctx.send("@everyone", file=file)
+                    await ctx.send(content="@everyone", file=file)
                 else:
                     await ctx.send(f"View performance report: {page_url}")
     except Exception as e:
