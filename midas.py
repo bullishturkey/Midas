@@ -613,7 +613,7 @@ async def performance(ctx):
     _last_performance = time.time()
     page_url = "https://bullishturkey.github.io/midas-onboarding/performance.html"
     try:
-        screenshot_url = f"https://api.microlink.io/?url={page_url}&screenshot=true&meta=false&waitFor=2000&viewport.width=520&element=.embed"
+        screenshot_url = f"https://api.microlink.io/?url={page_url}?v={int(time.time())}&screenshot=true&meta=false&waitFor=2000&force=true&viewport.width=520&element=.embed"
         async with aiohttp.ClientSession() as session:
             async with session.get(screenshot_url, timeout=aiohttp.ClientTimeout(total=60)) as r:
                 data = await r.json()
