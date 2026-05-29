@@ -915,20 +915,11 @@ async def handle_dm(message: discord.Message):
 async def performance(ctx):
     """Post the 2026 NDX model performance breakdown as a rich embed."""
 
-    # ── Month data ─────────────────────────────────────────────────────────────
-    months = [
-        ("January",       "+3", "+$1,500", "→ $3,500",  "+$3,000", "→ $8,000"),
-        ("February",      "+4", "+$2,000", "→ $5,500",  "+$4,000", "→ $12,000"),
-        ("March",         "-2", "-$1,000", "→ $4,500",  "-$2,000", "→ $10,000"),
-        ("April",         "+5", "+$2,500", "→ $7,000",  "+$5,000", "→ $15,000"),
-        ("May (so far)",  "+3", "+$3,000", "→ $10,000 ⬆️ 2x", "+$4,500", "→ $19,500 ⬆️ 3x"),
-    ]
-
     # ── Header embed ──────────────────────────────────────────────────────────
     header = discord.Embed(
-        title="📊 2026 Performance Update — NDX Vertical Spread Model",
+        title="📊 2026 Performance — NDX Vertical Spread Model",
         description=(
-            "Through May 27  ·  **3 trades remaining this month**\n\n"
+            "May 29 · **Month closed**\n\n"
             "**Instrument:** NDX Vertical Spreads  ·  **$500 / contract**\n"
             "**Scale Rule:** +1 contract every $5K after the $7K threshold"
         ),
@@ -942,29 +933,38 @@ async def performance(ctx):
         title="Monthly Breakdown",
         color=0x2b2d31,
     )
-    for month, result, g2k, b2k, g5k, b5k in months:
-        neg = result.startswith("-")
-        icon = "🔴" if neg else "🟢"
+    months = [
+        ("🟢", "January",  "+3", "+$1,500", "→ $3,500",  "+$3,000", "→ $8,000",   ""),
+        ("🟢", "February", "+4", "+$2,000", "→ $5,500",  "+$4,000", "→ $12,000",  ""),
+        ("🔴", "March",    "-2", "-$1,000", "→ $4,500",  "-$2,000", "→ $10,000",  ""),
+        ("🟢", "April",    "+5", "+$2,500", "→ $7,000",  "+$5,000", "→ $15,000",  ""),
+        ("🟢", "May",      "+4 wins", "+$3,892", "→ $10,892 ⬆️ 2x", "+$5,892", "→ $20,892 ⬆️ 3x",
+         "*Special trades: +$200 / -$111 / -$197 (net -$108)*"),
+    ]
+    for icon, month, result, g2k, b2k, g5k, b5k, note in months:
+        value = (
+            f"**$2K path:** {g2k}  {b2k}\n"
+            f"**$5K path:** {g5k}  {b5k}"
+        )
+        if note:
+            value += f"\n{note}"
         table.add_field(
             name=f"{icon} {month}  ({result})",
-            value=(
-                f"**$2K path:** {g2k}  {b2k}\n"
-                f"**$5K path:** {g5k}  {b5k}"
-            ),
+            value=value,
             inline=False,
         )
     await ctx.send(embed=table)
 
     # ── Summary embed ─────────────────────────────────────────────────────────
     summary = discord.Embed(
-        title="📈 Where We Stand",
+        title="📈 Final Standings — End of May",
         color=0xD4AF37,
     )
     summary.add_field(
         name="💰 $2K Start",
         value=(
-            "**Balance:** $10,000\n"
-            "**Growth:** +$8,000 (+400%)\n"
+            "**Balance:** $10,892\n"
+            "**Growth:** +$8,892 (+445%)\n"
             "**Contracts:** 2 active\n"
             "**Next bump:** $15K → 3 contracts"
         ),
@@ -973,22 +973,14 @@ async def performance(ctx):
     summary.add_field(
         name="💰 $5K Start",
         value=(
-            "**Balance:** $19,500\n"
-            "**Growth:** +$14,500 (+290%)\n"
+            "**Balance:** $20,892\n"
+            "**Growth:** +$15,892 (+318%)\n"
             "**Contracts:** 3 active\n"
-            "**Next bump:** $20K → 4 contracts"
+            "**Next bump:** $25K → 4 contracts"
         ),
         inline=True,
     )
-    summary.add_field(
-        name="⏳ 3 Trades Left in May — Full Close Potential",
-        value=(
-            "**$2K path** closes clean → **$13,000**\n"
-            "**$5K path** closes clean → **$24,000**"
-        ),
-        inline=False,
-    )
-    summary.set_footer(text="One losing month all year. Everything else has been execution. Stay locked in. 🎯")
+    summary.set_footer(text="One losing month all year. Everything else has been execution. See you in June. 🎯")
     await ctx.send(embed=summary)
     await ctx.send("@everyone")
 
