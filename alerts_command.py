@@ -114,7 +114,7 @@ class AlertsCommandClient:
         result: dict,
         ndx_price: float,
     ):
-        """POST trade execution data to Alerts Command after every fill."""
+        """POST trade entry data to Alerts Command after every fill."""
         payload = {
             "event":           "trade.executed",
             "discord_id":      discord_id,
@@ -132,3 +132,41 @@ class AlertsCommandClient:
             "timestamp":       datetime.now(timezone.utc).isoformat(),
         }
         await self._post("/midas/trades", payload)
+
+    async def log_trade_close(
+        self,
+        discord_id: str,
+        display_name: str,
+        email: str,
+        entry: dict,
+        exit_price: float,
+        pnl_per_contract: float,
+    ):
+        """
+        POST trade close data to Alerts Command so we can track trial P&L.
+        Called when a spread expires worthless (max profit) or is closed early.
+
+        pnl_per_contract: positive = profit (kept credit), negative = loss.
+        For a $5 credit spread that expires worthless: pnl = +$5.00 per contract.
+        For a max loss: pnl = -(width - credit) per contract.
+        """
+        contracts = entry.get("contracts", 1)
+        total_pnl = round(pnl_per_contract * contracts * 100, 2)  # convert to dollars
+        outcome   = "win" if total_pnl > 0 else "loss" if total_pnl < 0 else "scratch"
+
+        payload = {
+            "api_key":      self.api_key,
+            "discord_id":   discord_id,
+            "display_name": display_name,
+            "email":        email,
+            "pnl":          total_pnl,
+            "contracts":    contracts,
+            "short_strike": entry.get("short_strike"),
+            "long_strike":  entry.get("long_strike"),
+            "entry_price":  entry.get("limit_price", 0),
+            "exit_price":   exit_price,
+            "outcome":      outcome,
+            "timestamp":    datetime.now(timezone.utc).isoformat(),
+        }
+        log.info("[trade_close] %s | PnL: $%.2f | %s", display_name, total_pnl, outcome)
+        await self._post("/midas/trade-close", payload)
