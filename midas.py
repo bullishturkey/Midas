@@ -685,11 +685,12 @@ async def on_message(message: discord.Message):
             if result["success"]:
                 if bot_channel:
                     await bot_channel.send(
-                        f"**Trade Executed** ✅ — {mention}\n"
+                        f"**Order Working** ⏳ — {mention}\n"
                         f"Midas — NDX 0DTE Put Credit Spread\n"
                         f"Short Put: `{result['short_strike']}` | Long Put: `{result['long_strike']}`\n"
                         f"Contracts: `{result['contracts']}` | Limit: `${result['limit_price']:.2f}`\n"
-                        f"Account: `{result['account']}` | Balance: `${result['balance']:,.2f}`"
+                        f"Account: `{result['account']}` | Balance: `${result['balance']:,.2f}`\n"
+                        f"*Order placed and working — confirmation will post once filled.*"
                     )
                 await ac.log_trade(discord_id, display_name, result, ndx_price)
                 # Check for milestone

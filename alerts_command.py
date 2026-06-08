@@ -128,7 +128,7 @@ class AlertsCommandClient:
             "account_balance": result.get("balance"),
             "account_number":  result.get("account"),
             "order_id":        result.get("order_id"),
-            "status":          "filled" if result.get("success") else "failed",
+            "status":          "working" if result.get("success") else "failed",
             "timestamp":       datetime.now(timezone.utc).isoformat(),
         }
         await self._post("/midas/trades", payload)
