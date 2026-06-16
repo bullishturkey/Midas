@@ -702,7 +702,9 @@ async def on_message(message: discord.Message):
         return
 
     # ── Public channel — @Midas mention ──────────────────────────────────────
-    if bot.user.mentioned_in(message) and not isinstance(message.channel, discord.DMChannel):
+    # Only respond if Midas was DIRECTLY mentioned (not via @everyone or @here)
+    direct_mention = f"<@{bot.user.id}>" in message.content or f"<@!{bot.user.id}>" in message.content
+    if direct_mention and not isinstance(message.channel, discord.DMChannel):
         content = message.content.replace(f"<@{bot.user.id}>", "").strip()
         if not content:
             await message.reply("Ask me anything — market data, options education, NDX levels, news. 🟡")
