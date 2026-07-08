@@ -349,6 +349,71 @@ class UserTradeExecutor:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    async def get_open_option_positions(self) -> list:
+        """Return all currently open option positions on this account."""
+        from tastytrade.account import Account
+        positions = await self.account.get_positions(self.session)
+        return [p for p in positions if str(getattr(p, 'instrument_type', '')).lower() in ('equity option', 'option')]
+
+    async def get_spread_net_value(self, short_strike: int, long_strike: int) -> float | None:
+        """
+        Fetch the current mid-price of the spread (short_put - long_put).
+        Returns net debit to close (positive = cost to close). Returns None if unavailable.
+        """
+        from tastytrade.instruments import Option, NestedOptionChain
+        try:
+            today = date.today().strftime("%Y-%m-%d")
+            chains = await NestedOptionChain.get(self.session, UNDERLYING)
+            chain = chains[0]
+            short_bid = short_ask = long_bid = long_ask = None
+            for expiration in chain.expirations:
+                if str(expiration.expiration_date) != today:
+                    continue
+                for s in expiration.strikes:
+                    strike_val = int(float(s.strike_price))
+                    if strike_val == short_strike and s.put:
+                        opt = await Option.get(self.session, s.put)
+                        short_bid = float(getattr(opt, 'bid', 0) or 0)
+                        short_ask = float(getattr(opt, 'ask', 0) or 0)
+                    if strike_val == long_strike and s.put:
+                        opt = await Option.get(self.session, s.put)
+                        long_bid = float(getattr(opt, 'bid', 0) or 0)
+                        long_ask = float(getattr(opt, 'ask', 0) or 0)
+            if None in (short_bid, short_ask, long_bid, long_ask):
+                return None
+            # Net debit to close = what we pay back: buy short put back, sell long put
+            short_mid = (short_bid + short_ask) / 2
+            long_mid  = (long_bid + long_ask) / 2
+            return round(short_mid - long_mid, 4)  # positive = cost to close
+        except Exception:
+            return None
+
+    async def close_spread(self, short_strike: int, long_strike: int, contracts: int) -> dict:
+        """Buy-to-close the short put and sell-to-close the long put at market."""
+        from tastytrade.order import (
+            NewOrder, OrderAction, OrderTimeInForce, OrderType, Leg, PriceEffect,
+        )
+        short_put = await self.get_0dte_option(short_strike, "P")
+        long_put  = await self.get_0dte_option(long_strike,  "P")
+        if not short_put or not long_put:
+            return {"success": False, "error": "Could not locate spread legs to close"}
+        order = NewOrder(
+            time_in_force=OrderTimeInForce.DAY,
+            order_type=OrderType.MARKET,
+            price_effect=PriceEffect.DEBIT,
+            legs=[
+                Leg(instrument_type=short_put.instrument_type, symbol=short_put.symbol,
+                    quantity=contracts, action=OrderAction.BUY_TO_CLOSE),
+                Leg(instrument_type=long_put.instrument_type,  symbol=long_put.symbol,
+                    quantity=contracts, action=OrderAction.SELL_TO_CLOSE),
+            ],
+        )
+        try:
+            response = await self.account.place_order(self.session, order, dry_run=False)
+            return {"success": True, "order_id": str(response)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
 
 # ── Discord Bot ────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
@@ -381,6 +446,189 @@ async def on_ready():
             f"Market: `{'OPEN 🟢' if is_market_open() else 'CLOSED 🔴'}`\n"
             f"Tag me with **@Midas** to ask about the market. DM me to manage your account."
         )
+    # Start background monitors
+    asyncio.create_task(profit_target_monitor())
+    asyncio.create_task(eod_close_monitor())
+
+
+# ── Active trade registry ──────────────────────────────────────────────────────
+# Tracks open trades placed this session so monitors can check prices.
+# Structure: { discord_id: { short_strike, long_strike, contracts, entry_credit, timestamp } }
+_active_trades: dict = {}
+
+def register_active_trade(discord_id: str, short_strike: int, long_strike: int,
+                           contracts: int, entry_credit: float):
+    """Called after a spread is successfully placed to register it for monitoring."""
+    _active_trades[discord_id] = {
+        "short_strike": short_strike,
+        "long_strike": long_strike,
+        "contracts": contracts,
+        "entry_credit": entry_credit,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+def clear_active_trade(discord_id: str):
+    _active_trades.pop(discord_id, None)
+
+
+# ── Profit Target Monitor ──────────────────────────────────────────────────────
+async def profit_target_monitor():
+    """
+    Every 60 seconds during market hours, check each subscriber's open trade.
+    If current spread value ≤ (1 - profit_target_pct/100) × entry_credit → close at market.
+    e.g. entry credit $5.00, target 50% → close when spread costs ≤ $2.50 to buy back.
+    """
+    await asyncio.sleep(30)  # brief startup delay
+    while True:
+        try:
+            if is_market_open():
+                subscribers = await ac.get_subscribers()
+                for sub in subscribers:
+                    discord_id = sub.get("discord_id")
+                    profit_target_pct = sub.get("profit_target_pct")
+                    if not discord_id or not profit_target_pct:
+                        continue
+                    trade = _active_trades.get(discord_id)
+                    if not trade:
+                        continue
+                    try:
+                        executor = UserTradeExecutor(
+                            sub.get("tastytrade_client_secret"),
+                            sub.get("tastytrade_refresh_token"),
+                        )
+                        await executor.connect(account_number=sub.get("account_number"))
+                        current_value = await executor.get_spread_net_value(
+                            trade["short_strike"], trade["long_strike"]
+                        )
+                        if current_value is None:
+                            continue
+                        entry = trade["entry_credit"]
+                        target_value = round(entry * (1 - profit_target_pct / 100), 4)
+                        if current_value <= target_value:
+                            result = await executor.close_spread(
+                                trade["short_strike"], trade["long_strike"], trade["contracts"]
+                            )
+                            bot_channel = bot.get_channel(BOT_CHANNEL_ID)
+                            mention = f"<@{discord_id}>"
+                            if result["success"]:
+                                clear_active_trade(discord_id)
+                                profit = round((entry - current_value) * trade["contracts"] * 100, 2)
+                                log.info(f"Profit target hit for {discord_id} — closed at ${current_value:.2f} (target {profit_target_pct}%) P&L ~${profit}")
+                                if bot_channel:
+                                    await bot_channel.send(
+                                        f"✅ **Profit Target Hit** — {mention}\n"
+                                        f"Spread closed at **${current_value:.2f}** "
+                                        f"({profit_target_pct}% profit target reached)\n"
+                                        f"Estimated P&L: **+${profit:,.2f}**"
+                                    )
+                            else:
+                                log.warning(f"Profit target close failed for {discord_id}: {result.get('error')}")
+                                if bot_channel:
+                                    await bot_channel.send(
+                                        f"⚠️ **Profit Target Close Failed** — {mention}\n"
+                                        f"Could not close spread automatically: `{result.get('error')}`\n"
+                                        f"Please close manually in Tastytrade."
+                                    )
+                    except Exception as e:
+                        log.warning(f"Profit target check error for {discord_id}: {e}")
+        except Exception as e:
+            log.warning(f"profit_target_monitor loop error: {e}")
+        await asyncio.sleep(60)
+
+
+# ── EOD Auto-Close Monitor ─────────────────────────────────────────────────────
+# Closes any open trade at 12:49 PM PT (= 20:49 UTC) if the spread has NOT reached
+# 0.4% gain above entry credit (i.e. the trade is not sufficiently profitable yet).
+EOD_CLOSE_HOUR_PT   = 12
+EOD_CLOSE_MINUTE_PT = 49
+EOD_MIN_GAIN_PCT    = 0.4   # must be at least 0.4% profitable to skip EOD close
+
+_eod_closed_today: set = set()  # discord_ids already closed today
+
+async def eod_close_monitor():
+    """
+    Polls every 30 seconds. At 12:49 PM PT, closes any open trade where the
+    subscriber has eod_close_enabled=True and the position is not ≥0.4% above entry.
+    Resets the closed-today registry at midnight PT.
+    """
+    import pytz
+    PT = pytz.timezone("America/Los_Angeles")
+    await asyncio.sleep(60)
+    last_reset_date = None
+    while True:
+        try:
+            now_pt = datetime.now(PT)
+            today = now_pt.date()
+
+            # Reset the daily registry at midnight PT
+            if last_reset_date != today:
+                _eod_closed_today.clear()
+                last_reset_date = today
+
+            # Only act at 12:49 PM PT (±30s window)
+            is_eod_window = (
+                now_pt.hour == EOD_CLOSE_HOUR_PT
+                and now_pt.minute == EOD_CLOSE_MINUTE_PT
+            )
+            if is_eod_window and is_market_open():
+                subscribers = await ac.get_subscribers()
+                for sub in subscribers:
+                    discord_id = sub.get("discord_id")
+                    eod_enabled = sub.get("eod_close_enabled", False)
+                    if not discord_id or not eod_enabled:
+                        continue
+                    if discord_id in _eod_closed_today:
+                        continue
+                    trade = _active_trades.get(discord_id)
+                    if not trade:
+                        continue
+                    try:
+                        executor = UserTradeExecutor(
+                            sub.get("tastytrade_client_secret"),
+                            sub.get("tastytrade_refresh_token"),
+                        )
+                        await executor.connect(account_number=sub.get("account_number"))
+                        current_value = await executor.get_spread_net_value(
+                            trade["short_strike"], trade["long_strike"]
+                        )
+                        entry = trade["entry_credit"]
+                        # Determine if trade is 0.4%+ above entry
+                        # Profit on spread = entry - current_value (what we collected minus what it costs to close)
+                        profit_pct = ((entry - current_value) / entry * 100) if (current_value is not None and entry > 0) else 0
+                        if profit_pct >= EOD_MIN_GAIN_PCT:
+                            log.info(f"EOD close skipped for {discord_id} — trade is {profit_pct:.2f}% profitable, above 0.4% threshold")
+                            continue
+                        # Not profitable enough — close it
+                        result = await executor.close_spread(
+                            trade["short_strike"], trade["long_strike"], trade["contracts"]
+                        )
+                        bot_channel = bot.get_channel(BOT_CHANNEL_ID)
+                        mention = f"<@{discord_id}>"
+                        _eod_closed_today.add(discord_id)
+                        if result["success"]:
+                            clear_active_trade(discord_id)
+                            log.info(f"EOD close executed for {discord_id} — {profit_pct:.2f}% profitable at close time")
+                            if bot_channel:
+                                await bot_channel.send(
+                                    f"🕐 **EOD Auto-Close** — {mention}\n"
+                                    f"Position closed at **12:49 PM PT** — trade was "
+                                    f"{'unprofitable' if profit_pct < 0 else f'only {profit_pct:.2f}% profitable'} "
+                                    f"(below the 0.4% threshold).\n"
+                                    f"Close value: **${current_value:.2f}** vs entry **${entry:.2f}**"
+                                )
+                        else:
+                            log.warning(f"EOD close failed for {discord_id}: {result.get('error')}")
+                            if bot_channel:
+                                await bot_channel.send(
+                                    f"⚠️ **EOD Auto-Close Failed** — {mention}\n"
+                                    f"Could not auto-close at 12:49 PM PT: `{result.get('error')}`\n"
+                                    f"**Please close your position manually in Tastytrade immediately.**"
+                                )
+                    except Exception as e:
+                        log.warning(f"EOD close error for {discord_id}: {e}")
+        except Exception as e:
+            log.warning(f"eod_close_monitor loop error: {e}")
+        await asyncio.sleep(30)
 
 
 @bot.event
@@ -693,6 +941,15 @@ async def on_message(message: discord.Message):
                         f"*Order placed and working — confirmation will post once filled.*"
                     )
                 await ac.log_trade(discord_id, display_name, result, ndx_price)
+                # Register trade for profit target + EOD monitors
+                if discord_id:
+                    register_active_trade(
+                        discord_id,
+                        result["short_strike"],
+                        result["long_strike"],
+                        result["contracts"],
+                        float(result["limit_price"]),
+                    )
                 # Check for milestone
                 if discord_id and result.get("balance"):
                     await check_milestone(discord_id, display_name, float(result["balance"]))

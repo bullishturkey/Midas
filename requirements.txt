@@ -5,3 +5,4 @@ aiohttp==3.13.5
 groq
 yfinance
 anthropic
+pytz
