@@ -926,7 +926,30 @@ async def on_message(message: discord.Message):
                 await executor.connect(account_number=account_num)
                 result = await executor.place_spread(ndx_price, limit_price)
             except Exception as e:
-                result = {"success": False, "error": str(e)}
+                err_str = str(e)
+                # Detect expired/revoked Tastytrade credentials
+                if 'invalid_grant' in err_str.lower() or 'invalid jwt' in err_str.lower() or 'invalid_grant' in err_str:
+                    # Auto-disable auto_trade so this doesn't fire on every alert
+                    try:
+                        await ac.update_subscriber(discord_id, {'auto_trade': False})
+                    except Exception:
+                        pass
+                    # DM the user to reconnect
+                    if discord_id:
+                        try:
+                            user_obj = await bot.fetch_user(int(discord_id))
+                            await user_obj.send(
+                                "⚠️ **Midas Auto-Trader Disabled**\n\n"
+                                "Your Tastytrade connection has expired (Invalid JWT / refresh token revoked).\n"
+                                "Your auto-trader has been **turned off** to prevent failed trade attempts.\n\n"
+                                "**To fix:** Open the Alerts Command app → Midas → disconnect and reconnect your Tastytrade account.\n"
+                                "Then re-enable Auto-Trader."
+                            )
+                        except Exception:
+                            pass
+                    result = {"success": False, "error": f"Tastytrade credentials expired — auto-trader disabled. Please reconnect in the app. ({err_str})"}
+                else:
+                    result = {"success": False, "error": err_str}
 
             mention = f"<@{discord_id}>" if discord_id else display_name
 
