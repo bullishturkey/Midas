@@ -23,6 +23,7 @@ import os
 import re
 import math
 import logging
+import httpx
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -68,7 +69,22 @@ ac = AlertsCommandClient(
     api_key=os.getenv("ALERTS_COMMAND_KEY"),
 )
 
-# ── Conversation History (in-memory per user DM) ──────────────────────────────
+AC_BASE = os.getenv("ALERTS_COMMAND_URL", "https://alert-command-app.onrender.com/api").rstrip("/api").rstrip("/")
+AC_KEY  = os.getenv("ALERTS_COMMAND_KEY", "")
+
+async def push_user(discord_id: str, title: str, message: str, data: dict = None):
+    """Send a push notification to a user's iPhone via the Alert Command App backend."""
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as c:
+            await c.post(
+                f"{AC_BASE}/api/midas/notify-user",
+                json={"discord_id": discord_id, "title": title, "message": message, "data": data or {}},
+                headers={"X-Midas-Key": AC_KEY},
+            )
+    except Exception as e:
+        log.warning(f"push_user failed for {discord_id}: {e}")
+
+
 conversation_history: dict = {}
 
 # ── Personal topic keywords ────────────────────────────────────────────────────
@@ -503,7 +519,27 @@ async def profit_target_monitor():
                         if current_value is None:
                             continue
                         entry = trade["entry_credit"]
+                        current_profit_pct = round((entry - current_value) / entry * 100, 1) if entry > 0 else 0
                         target_value = round(entry * (1 - profit_target_pct / 100), 4)
+
+                        # ── Profit milestone push alerts (70%, 80%, 90%) ──────────
+                        # Alert at milestone thresholds below the auto-close target
+                        # Only fire each milestone once per trade (tracked in trade registry)
+                        milestones = trade.get("alerted_milestones", set())
+                        for milestone in [50, 60, 70, 80, 90]:
+                            if milestone >= profit_target_pct:
+                                break  # don't alert below auto-close level
+                            if current_profit_pct >= milestone and milestone not in milestones:
+                                milestones.add(milestone)
+                                _active_trades[discord_id]["alerted_milestones"] = milestones
+                                asyncio.create_task(push_user(
+                                    discord_id,
+                                    title=f"📈 {milestone}% Profit Reached",
+                                    message=f"Your NDX {trade['short_strike']}/{trade['long_strike']} spread is at {current_profit_pct:.0f}% profit. Consider closing or holding to your {profit_target_pct}% target.",
+                                    data={"type": "profit_alert", "profit_pct": current_profit_pct, "milestone": milestone},
+                                ))
+                                log.info(f"Profit milestone {milestone}% alert sent to {discord_id}")
+
                         if current_value <= target_value:
                             result = await executor.close_spread(
                                 trade["short_strike"], trade["long_strike"], trade["contracts"]
@@ -514,6 +550,13 @@ async def profit_target_monitor():
                                 clear_active_trade(discord_id)
                                 profit = round((entry - current_value) * trade["contracts"] * 100, 2)
                                 log.info(f"Profit target hit for {discord_id} — closed at ${current_value:.2f} (target {profit_target_pct}%) P&L ~${profit}")
+                                # Push notification — profit target reached
+                                asyncio.create_task(push_user(
+                                    discord_id,
+                                    title=f"✅ {profit_target_pct}% Profit Target Hit!",
+                                    message=f"Your spread was auto-closed. Estimated P&L: +${profit:,.2f}",
+                                    data={"type": "profit_target_closed", "profit": profit},
+                                ))
                                 if bot_channel:
                                     await bot_channel.send(
                                         f"✅ **Profit Target Hit** — {mention}\n"
@@ -592,11 +635,15 @@ async def eod_close_monitor():
                             trade["short_strike"], trade["long_strike"]
                         )
                         entry = trade["entry_credit"]
-                        # Determine if trade is 0.4%+ above entry
+                        # Use per-user threshold if set, otherwise global default
+                        user_threshold = sub.get("eod_close_threshold_pct", EOD_MIN_GAIN_PCT)
+                        if user_threshold is None:
+                            user_threshold = EOD_MIN_GAIN_PCT
+                        # Determine if trade is above user's threshold
                         # Profit on spread = entry - current_value (what we collected minus what it costs to close)
                         profit_pct = ((entry - current_value) / entry * 100) if (current_value is not None and entry > 0) else 0
-                        if profit_pct >= EOD_MIN_GAIN_PCT:
-                            log.info(f"EOD close skipped for {discord_id} — trade is {profit_pct:.2f}% profitable, above 0.4% threshold")
+                        if profit_pct >= user_threshold:
+                            log.info(f"EOD close skipped for {discord_id} — trade is {profit_pct:.2f}% profitable, above {user_threshold}% threshold")
                             continue
                         # Not profitable enough — close it
                         result = await executor.close_spread(
@@ -613,7 +660,7 @@ async def eod_close_monitor():
                                     f"🕐 **EOD Auto-Close** — {mention}\n"
                                     f"Position closed at **12:49 PM PT** — trade was "
                                     f"{'unprofitable' if profit_pct < 0 else f'only {profit_pct:.2f}% profitable'} "
-                                    f"(below the 0.4% threshold).\n"
+                                    f"(below your {user_threshold}% threshold).\\n"
                                     f"Close value: **${current_value:.2f}** vs entry **${entry:.2f}**"
                                 )
                         else:
@@ -964,6 +1011,14 @@ async def on_message(message: discord.Message):
                         f"*Order placed and working — confirmation will post once filled.*"
                     )
                 await ac.log_trade(discord_id, display_name, result, ndx_price)
+                # Push notification — trade confirmation to iPhone
+                if discord_id:
+                    asyncio.create_task(push_user(
+                        discord_id,
+                        title="⚡ Trade Placed — Midas",
+                        message=f"NDX {result['short_strike']}/{result['long_strike']} Put Spread · {result['contracts']} contract{'s' if result['contracts'] != 1 else ''} · Limit ${result['limit_price']:.2f}",
+                        data={"type": "trade_confirmation", "short_strike": result["short_strike"], "long_strike": result["long_strike"]},
+                    ))
                 # Register trade for profit target + EOD monitors
                 if discord_id:
                     register_active_trade(
