@@ -72,6 +72,47 @@ ac = AlertsCommandClient(
 AC_BASE = os.getenv("ALERTS_COMMAND_URL", "https://alert-command-app.onrender.com/api").rstrip("/api").rstrip("/")
 AC_KEY  = os.getenv("ALERTS_COMMAND_KEY", "")
 
+async def _poll_fill(executor, order_id, discord_id: str, display_name: str,
+                     account: str, trade_result: dict, bot_channel):
+    """Poll Tastytrade every 5s for up to 90s until the order fills, then post confirmation."""
+    try:
+        mention = f"<@{discord_id}>"
+        for _ in range(18):  # 18 × 5s = 90s max
+            await asyncio.sleep(5)
+            try:
+                order = await executor.account.get_order(executor.session, order_id)
+                status = str(getattr(order, 'status', '')).lower()
+                if status in ('filled', 'fill'):
+                    fill_price = getattr(order, 'price', None) or trade_result.get('limit_price')
+                    contracts  = trade_result.get('contracts', 1)
+                    if bot_channel:
+                        await bot_channel.send(
+                            f"✅ **Order Filled**\n"
+                            f"**{display_name}** ({mention}) · `{account}`\n"
+                            f"NDX `{trade_result['short_strike']}` / `{trade_result['long_strike']}` Put Spread\n"
+                            f"Contracts: `{contracts}` | Fill Price: `${float(fill_price):.2f}` credit"
+                        )
+                    return
+                elif status in ('cancelled', 'rejected', 'expired'):
+                    if bot_channel:
+                        await bot_channel.send(
+                            f"❌ **Order {status.title()}** — **{display_name}** ({mention}) · `{account}`\n"
+                            f"NDX `{trade_result['short_strike']}` / `{trade_result['long_strike']}` — "
+                            f"Check Tastytrade to re-enter manually."
+                        )
+                    return
+            except Exception as poll_err:
+                log.warning(f"_poll_fill check error for {discord_id}: {poll_err}")
+        # Timed out — let them know
+        if bot_channel:
+            await bot_channel.send(
+                f"⚠️ **Order Still Working** — **{display_name}** ({mention}) · `{account}`\n"
+                f"NDX `{trade_result['short_strike']}` / `{trade_result['long_strike']}` — "
+                f"Order not confirmed filled after 90s. Check Tastytrade."
+            )
+    except Exception as e:
+        log.warning(f"_poll_fill failed for {discord_id}: {e}")
+
 async def push_user(discord_id: str, title: str, message: str, data: dict = None):
     """Send a push notification to a user's iPhone via the Alert Command App backend."""
     try:
@@ -356,11 +397,12 @@ class UserTradeExecutor:
 
         try:
             response = await self.account.place_order(self.session, order, dry_run=False)
+            order_id = response.order.id
             return {
                 "success": True, "short_strike": short_strike, "long_strike": long_strike,
                 "contracts": contracts, "limit_price": limit_price,
                 "balance": balance, "account": self.account.account_number,
-                "order_id": str(response),
+                "order_id": order_id,
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -956,17 +998,28 @@ async def on_message(message: discord.Message):
         bot_channel = bot.get_channel(BOT_CHANNEL_ID)
         subscribers = await ac.get_subscribers()
 
+        # ── Filter to eligible subscribers ────────────────────────────────────
+        eligible = []
         for sub in subscribers:
+            auto_trade   = sub.get("auto_trade", True)
+            tt_secret    = sub.get("tastytrade_client_secret")
+            tt_refresh   = sub.get("tastytrade_refresh_token")
+            if not auto_trade or not tt_secret or not tt_refresh:
+                continue
+            eligible.append(sub)
+
+        if not eligible:
+            return
+
+        # ── Execute ALL accounts simultaneously via asyncio.gather ────────────
+        async def trade_one(sub):
             discord_id   = sub.get("discord_id")
             tt_secret    = sub.get("tastytrade_client_secret")
             tt_refresh   = sub.get("tastytrade_refresh_token")
             limit_price  = float(sub.get("limit_price", DEFAULT_LIMIT))
-            auto_trade   = sub.get("auto_trade", True)
             account_num  = sub.get("account_number")
             display_name = sub.get("display_name", "Subscriber")
-
-            if not auto_trade or not tt_secret or not tt_refresh:
-                continue
+            mention      = f"<@{discord_id}>" if discord_id else display_name
 
             try:
                 executor = UserTradeExecutor(tt_secret, tt_refresh)
@@ -974,14 +1027,11 @@ async def on_message(message: discord.Message):
                 result = await executor.place_spread(ndx_price, limit_price)
             except Exception as e:
                 err_str = str(e)
-                # Detect expired/revoked Tastytrade credentials
-                if 'invalid_grant' in err_str.lower() or 'invalid jwt' in err_str.lower() or 'invalid_grant' in err_str:
-                    # Auto-disable auto_trade so this doesn't fire on every alert
+                if 'invalid_grant' in err_str.lower() or 'invalid jwt' in err_str.lower():
                     try:
                         await ac.update_subscriber(discord_id, {'auto_trade': False})
                     except Exception:
                         pass
-                    # DM the user to reconnect
                     if discord_id:
                         try:
                             user_obj = await bot.fetch_user(int(discord_id))
@@ -994,24 +1044,25 @@ async def on_message(message: discord.Message):
                             )
                         except Exception:
                             pass
-                    result = {"success": False, "error": f"Tastytrade credentials expired — auto-trader disabled. Please reconnect in the app. ({err_str})"}
+                    result = {"success": False, "error": f"Credentials expired — auto-trader disabled. ({err_str})"}
                 else:
                     result = {"success": False, "error": err_str}
 
-            mention = f"<@{discord_id}>" if discord_id else display_name
-
             if result["success"]:
+                acct   = result.get("account", account_num or "—")
+                # Post "Order Working" with display_name + account number
                 if bot_channel:
                     await bot_channel.send(
-                        f"**Order Working** ⏳ — {mention}\n"
-                        f"Midas — NDX 0DTE Put Credit Spread\n"
+                        f"**Order Working** ⏳\n"
+                        f"**{display_name}** ({mention}) · `{acct}`\n"
+                        f"NDX 0DTE Put Credit Spread\n"
                         f"Short Put: `{result['short_strike']}` | Long Put: `{result['long_strike']}`\n"
                         f"Contracts: `{result['contracts']}` | Limit: `${result['limit_price']:.2f}`\n"
-                        f"Account: `{result['account']}` | Balance: `${result['balance']:,.2f}`\n"
-                        f"*Order placed and working — confirmation will post once filled.*"
+                        f"Balance: `${result['balance']:,.2f}`"
                     )
                 await ac.log_trade(discord_id, display_name, result, ndx_price)
-                # Push notification — trade confirmation to iPhone
+
+                # Push notification to iPhone
                 if discord_id:
                     asyncio.create_task(push_user(
                         discord_id,
@@ -1019,7 +1070,8 @@ async def on_message(message: discord.Message):
                         message=f"NDX {result['short_strike']}/{result['long_strike']} Put Spread · {result['contracts']} contract{'s' if result['contracts'] != 1 else ''} · Limit ${result['limit_price']:.2f}",
                         data={"type": "trade_confirmation", "short_strike": result["short_strike"], "long_strike": result["long_strike"]},
                     ))
-                # Register trade for profit target + EOD monitors
+
+                # Register for profit target + EOD monitors
                 if discord_id:
                     register_active_trade(
                         discord_id,
@@ -1028,12 +1080,27 @@ async def on_message(message: discord.Message):
                         result["contracts"],
                         float(result["limit_price"]),
                     )
-                # Check for milestone
+
+                # Milestone check
                 if discord_id and result.get("balance"):
                     await check_milestone(discord_id, display_name, float(result["balance"]))
+
+                # ── Poll for fill confirmation (up to 60s) ────────────────────
+                order_id = result.get("order_id")
+                if order_id and discord_id:
+                    asyncio.create_task(
+                        _poll_fill(executor, order_id, discord_id, display_name, acct, result, bot_channel)
+                    )
+
             else:
                 if bot_channel:
-                    await bot_channel.send(f"⚠️ Trade failed for {mention}: `{result.get('error')}`")
+                    await bot_channel.send(
+                        f"⚠️ **Trade Failed** — **{display_name}** ({mention}) · `{account_num or '—'}`\n"
+                        f"`{result.get('error')}`"
+                    )
+
+        # Fire all trades at the same moment
+        await asyncio.gather(*[trade_one(sub) for sub in eligible], return_exceptions=True)
         return
 
     # ── Public channel — @Midas mention ──────────────────────────────────────
