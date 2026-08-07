@@ -447,17 +447,27 @@ class UserTradeExecutor:
             return None
 
     async def close_spread(self, short_strike: int, long_strike: int, contracts: int) -> dict:
-        """Buy-to-close the short put and sell-to-close the long put at market."""
+        """Buy-to-close the short put and sell-to-close the long put with a marketable limit order."""
         from tastytrade.order import (
             NewOrder, OrderAction, OrderTimeInForce, OrderType, Leg, PriceEffect,
         )
+        from decimal import Decimal
         short_put = await self.get_0dte_option(short_strike, "P")
         long_put  = await self.get_0dte_option(long_strike,  "P")
         if not short_put or not long_put:
             return {"success": False, "error": "Could not locate spread legs to close"}
+
+        # Tastytrade rejects Market orders on multi-leg spreads — use a marketable limit instead.
+        # Fetch mid price of the spread; add $0.05 buffer so the order fills immediately.
+        close_price = await self.get_spread_net_value(short_strike, long_strike)
+        if close_price is None or close_price <= 0:
+            close_price = 0.10  # safe fallback for near-expiry spreads
+        limit_price = round(close_price + 0.05, 2)
+
         order = NewOrder(
             time_in_force=OrderTimeInForce.DAY,
-            order_type=OrderType.MARKET,
+            order_type=OrderType.LIMIT,
+            price=Decimal(str(limit_price)),
             price_effect=PriceEffect.DEBIT,
             legs=[
                 Leg(instrument_type=short_put.instrument_type, symbol=short_put.symbol,
