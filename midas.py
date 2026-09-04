@@ -126,6 +126,21 @@ async def push_user(discord_id: str, title: str, message: str, data: dict = None
         log.warning(f"push_user failed for {discord_id}: {e}")
 
 
+async def notify_credentials_expired(discord_id: str, display_name: str = "Subscriber"):
+    """Call the Alerts Command backend to send push + email + disable auto-trade
+    when Tastytrade credentials are rejected (invalid_grant)."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            await c.post(
+                f"{AC_BASE}/api/midas/credentials-expired",
+                json={"discord_id": discord_id, "display_name": display_name},
+                headers={"X-Midas-Key": AC_KEY, "Content-Type": "application/json"},
+            )
+        log.info(f"credentials-expired notification sent for {discord_id} ({display_name})")
+    except Exception as e:
+        log.warning(f"notify_credentials_expired failed for {discord_id}: {e}")
+
+
 conversation_history: dict = {}
 
 # ── Personal topic keywords ────────────────────────────────────────────────────
@@ -1038,10 +1053,15 @@ async def on_message(message: discord.Message):
             except Exception as e:
                 err_str = str(e)
                 if 'invalid_grant' in err_str.lower() or 'invalid jwt' in err_str.lower():
-                    try:
-                        await ac.update_subscriber(discord_id, {'auto_trade': False})
-                    except Exception:
-                        pass
+                    # Disable auto-trade via backend + send push + email
+                    if discord_id:
+                        asyncio.create_task(notify_credentials_expired(discord_id, display_name))
+                    else:
+                        try:
+                            await ac.update_subscriber(discord_id, {'auto_trade': False})
+                        except Exception:
+                            pass
+                    # Also DM on Discord
                     if discord_id:
                         try:
                             user_obj = await bot.fetch_user(int(discord_id))
@@ -1050,11 +1070,11 @@ async def on_message(message: discord.Message):
                                 "Your Tastytrade connection has expired (Invalid JWT / refresh token revoked).\n"
                                 "Your auto-trader has been **turned off** to prevent failed trade attempts.\n\n"
                                 "**To fix:** Open the Alerts Command app → Midas → disconnect and reconnect your Tastytrade account.\n"
-                                "Then re-enable Auto-Trader."
+                                "Auto-trader will re-enable automatically once valid credentials are saved."
                             )
                         except Exception:
                             pass
-                    result = {"success": False, "error": f"Credentials expired — auto-trader disabled. ({err_str})"}
+                    result = {"success": False, "error": f"Credentials expired — auto-trader disabled. Push + email sent. ({err_str})"}
                 else:
                     result = {"success": False, "error": err_str}
 
