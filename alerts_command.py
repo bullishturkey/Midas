@@ -141,9 +141,15 @@ class AlertsCommandClient:
         entry: dict,
         exit_price: float,
         pnl_per_contract: float,
+        dashboard_url: str,
+        dashboard_api_key: str = "",
     ):
         """
-        POST trade close data to Alerts Command so we can track trial P&L.
+        POST trade close data to BOTH:
+          1. The NDX Dashboard backend (trial_pnl collection — 14-day trial clock)
+          2. Alerts Command / Alert-Command-App (midas_trades.pnl — this is what the
+             admin command-center actually reads for each client's P&L figure; it was
+             previously always 0 because nothing ever wrote pnl back onto a trade).
         Called when a spread expires worthless (max profit) or is closed early.
 
         pnl_per_contract: positive = profit (kept credit), negative = loss.
@@ -154,8 +160,7 @@ class AlertsCommandClient:
         total_pnl = round(pnl_per_contract * contracts * 100, 2)  # convert to dollars
         outcome   = "win" if total_pnl > 0 else "loss" if total_pnl < 0 else "scratch"
 
-        payload = {
-            "api_key":      self.api_key,
+        common = {
             "discord_id":   discord_id,
             "display_name": display_name,
             "email":        email,
@@ -169,4 +174,24 @@ class AlertsCommandClient:
             "timestamp":    datetime.now(timezone.utc).isoformat(),
         }
         log.info("[trade_close] %s | PnL: $%.2f | %s", display_name, total_pnl, outcome)
-        await self._post("/midas/trade-close", payload)
+
+        # 1. NDX Dashboard backend (trial P&L tracking)
+        dash_payload = dict(common, api_key=dashboard_api_key)
+        url = f"{dashboard_url.rstrip('/')}/api/midas/trade-close"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=dash_payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status in (200, 201):
+                        log.info("POST dashboard /midas/trade-close OK")
+                    else:
+                        body = await resp.text()
+                        log.warning("POST dashboard /midas/trade-close failed: %s — %s", resp.status, body)
+        except Exception as e:
+            log.error("POST dashboard /midas/trade-close error: %s", e)
+
+        # 2. Alerts Command (this.base_url) — feeds the admin command-center P&L
+        await self._post("/midas/trade-close", common)

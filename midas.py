@@ -27,6 +27,20 @@ import httpx
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+# ── Background task registry ──────────────────────────────────────────────────
+# asyncio.create_task() results MUST be referenced somewhere, or the task can be
+# garbage-collected mid-flight before it completes (this was silently killing
+# fill-confirmation polling and push notifications for every client).
+_background_tasks: set = set()
+
+def spawn_task(coro):
+    """Fire-and-forget a coroutine while keeping a strong reference so it can't
+    be garbage-collected before it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -71,6 +85,10 @@ ac = AlertsCommandClient(
 
 AC_BASE = os.getenv("ALERTS_COMMAND_URL", "https://alert-command-app.onrender.com/api").rstrip("/api").rstrip("/")
 AC_KEY  = os.getenv("ALERTS_COMMAND_KEY", "")
+
+# NDX Dashboard backend — separate service, holds trial_pnl / midas_trades P&L records
+DASHBOARD_URL = os.getenv("NDX_DASHBOARD_URL", "https://ndx-alerts-backend.onrender.com")
+DASHBOARD_KEY = os.getenv("NDX_DASHBOARD_MIDAS_KEY", "")
 
 async def _poll_fill(executor, order_id, discord_id: str, display_name: str,
                      account: str, trade_result: dict, bot_channel):
@@ -462,15 +480,51 @@ class UserTradeExecutor:
             return None
 
     async def close_spread(self, short_strike: int, long_strike: int, contracts: int) -> dict:
-        """Buy-to-close the short put and sell-to-close the long put with a marketable limit order."""
+        """
+        Buy-to-close the short put and sell-to-close the long put with a marketable limit order.
+
+        IMPORTANT: legs are built from the account's ACTUAL open positions (matched by
+        strike in the OCC symbol), not re-resolved from a fresh option-chain lookup.
+        Re-resolving by strike could occasionally hand back the same contract for both
+        legs (e.g. ambiguous/duplicate chain rows), which Tastytrade rejects with
+        'illegal_buy_and_sell_on_same_symbol'. Closing the real held legs avoids that
+        entirely and is also correct even if the chain has shifted intraday.
+        """
         from tastytrade.order import (
             NewOrder, OrderAction, OrderTimeInForce, OrderType, Leg, PriceEffect,
         )
         from decimal import Decimal
-        short_put = await self.get_0dte_option(short_strike, "P")
-        long_put  = await self.get_0dte_option(long_strike,  "P")
-        if not short_put or not long_put:
-            return {"success": False, "error": "Could not locate spread legs to close"}
+        import re as _re
+
+        positions = await self.get_open_option_positions()
+
+        def _match(strike: int):
+            for p in positions:
+                if str(getattr(p, "underlying_symbol", "") or "").strip() != UNDERLYING:
+                    continue
+                sym = getattr(p, "symbol", "") or ""
+                m = _re.search(r"P0*(\d+)(?:\.\d+)?$", sym.replace(" ", ""))
+                if m and int(m.group(1)) // 1000 == strike:
+                    return p
+            return None
+
+        short_pos = _match(short_strike)
+        long_pos  = _match(long_strike)
+
+        if not short_pos or not long_pos or short_pos.symbol == long_pos.symbol:
+            # Fall back to chain lookup only if we truly can't find the held legs
+            short_put = await self.get_0dte_option(short_strike, "P")
+            long_put  = await self.get_0dte_option(long_strike,  "P")
+            if not short_put or not long_put or short_put.symbol == long_put.symbol:
+                return {"success": False, "error": "Could not locate distinct spread legs to close"}
+            short_symbol, short_itype = short_put.symbol, short_put.instrument_type
+            long_symbol,  long_itype  = long_put.symbol,  long_put.instrument_type
+        else:
+            short_symbol, short_itype = short_pos.symbol, short_pos.instrument_type
+            long_symbol,  long_itype  = long_pos.symbol,  long_pos.instrument_type
+
+        if short_symbol == long_symbol:
+            return {"success": False, "error": "Short and long leg resolved to the same symbol — aborting close"}
 
         # Tastytrade rejects Market orders on multi-leg spreads — use a marketable limit instead.
         # Fetch mid price of the spread; add $0.05 buffer so the order fills immediately.
@@ -485,15 +539,16 @@ class UserTradeExecutor:
             price=Decimal(str(limit_price)),
             price_effect=PriceEffect.DEBIT,
             legs=[
-                Leg(instrument_type=short_put.instrument_type, symbol=short_put.symbol,
+                Leg(instrument_type=short_itype, symbol=short_symbol,
                     quantity=contracts, action=OrderAction.BUY_TO_CLOSE),
-                Leg(instrument_type=long_put.instrument_type,  symbol=long_put.symbol,
+                Leg(instrument_type=long_itype,  symbol=long_symbol,
                     quantity=contracts, action=OrderAction.SELL_TO_CLOSE),
             ],
         )
         try:
             response = await self.account.place_order(self.session, order, dry_run=False)
-            return {"success": True, "order_id": str(response)}
+            order_id = getattr(getattr(response, "order", None), "id", None) or str(response)
+            return {"success": True, "order_id": order_id}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -530,8 +585,9 @@ async def on_ready():
             f"Tag me with **@Midas** to ask about the market. DM me to manage your account."
         )
     # Start background monitors
-    asyncio.create_task(profit_target_monitor())
-    asyncio.create_task(eod_close_monitor())
+    spawn_task(profit_target_monitor())
+    spawn_task(eod_close_monitor())
+    spawn_task(balance_sync_monitor())
 
 
 # ── Active trade registry ──────────────────────────────────────────────────────
@@ -552,6 +608,46 @@ def register_active_trade(discord_id: str, short_strike: int, long_strike: int,
 
 def clear_active_trade(discord_id: str):
     _active_trades.pop(discord_id, None)
+
+
+# ── Account Balance Sync Monitor ────────────────────────────────────────────────
+# Keeps midas_subscribers.account_balance / account_number fresh so the admin
+# portal and contract-sizing logic never work off stale numbers. Previously the
+# balance was only written at trade time, so anyone who hadn't traded recently
+# (or whose trade failed) showed stale/zero data in the command center.
+BALANCE_SYNC_INTERVAL_S = 300  # 5 minutes
+
+async def balance_sync_monitor():
+    """Every 5 min, refresh account_balance + account_number for every subscriber
+    with valid Tastytrade credentials, regardless of auto_trade/trade activity."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            subscribers = await ac.get_subscribers()
+            for sub in subscribers:
+                discord_id = sub.get("discord_id")
+                tt_secret  = sub.get("tastytrade_client_secret")
+                tt_refresh = sub.get("tastytrade_refresh_token")
+                if not discord_id or not tt_secret or not tt_refresh:
+                    continue
+                try:
+                    executor = UserTradeExecutor(tt_secret, tt_refresh)
+                    await executor.connect(account_number=sub.get("account_number"))
+                    balance = await executor.get_balance()
+                    await ac.update_subscriber(discord_id, {
+                        "account_balance": balance,
+                        "account_number": executor.account.account_number,
+                        "balance_updated_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception as e:
+                    err_str = str(e)
+                    if 'invalid_grant' in err_str.lower() or 'invalid jwt' in err_str.lower():
+                        spawn_task(notify_credentials_expired(discord_id, sub.get("display_name", "Subscriber")))
+                    else:
+                        log.warning(f"balance_sync failed for {discord_id}: {e}")
+        except Exception as e:
+            log.warning(f"balance_sync_monitor loop error: {e}")
+        await asyncio.sleep(BALANCE_SYNC_INTERVAL_S)
 
 
 # ── Profit Target Monitor ──────────────────────────────────────────────────────
@@ -599,7 +695,7 @@ async def profit_target_monitor():
                             if current_profit_pct >= milestone and milestone not in milestones:
                                 milestones.add(milestone)
                                 _active_trades[discord_id]["alerted_milestones"] = milestones
-                                asyncio.create_task(push_user(
+                                spawn_task(push_user(
                                     discord_id,
                                     title=f"📈 {milestone}% Profit Reached",
                                     message=f"Your NDX {trade['short_strike']}/{trade['long_strike']} spread is at {current_profit_pct:.0f}% profit. Consider closing or holding to your {profit_target_pct}% target.",
@@ -615,10 +711,26 @@ async def profit_target_monitor():
                             mention = f"<@{discord_id}>"
                             if result["success"]:
                                 clear_active_trade(discord_id)
-                                profit = round((entry - current_value) * trade["contracts"] * 100, 2)
+                                pnl_per_contract = entry - current_value
+                                profit = round(pnl_per_contract * trade["contracts"] * 100, 2)
                                 log.info(f"Profit target hit for {discord_id} — closed at ${current_value:.2f} (target {profit_target_pct}%) P&L ~${profit}")
+                                spawn_task(ac.log_trade_close(
+                                    discord_id,
+                                    sub.get("display_name", "Subscriber"),
+                                    sub.get("email", ""),
+                                    {
+                                        "short_strike": trade["short_strike"],
+                                        "long_strike": trade["long_strike"],
+                                        "contracts": trade["contracts"],
+                                        "limit_price": entry,
+                                    },
+                                    exit_price=current_value,
+                                    pnl_per_contract=pnl_per_contract,
+                                    dashboard_url=DASHBOARD_URL,
+                                    dashboard_api_key=DASHBOARD_KEY,
+                                ))
                                 # Push notification — profit target reached
-                                asyncio.create_task(push_user(
+                                spawn_task(push_user(
                                     discord_id,
                                     title=f"✅ {profit_target_pct}% Profit Target Hit!",
                                     message=f"Your spread was auto-closed. Estimated P&L: +${profit:,.2f}",
@@ -721,7 +833,23 @@ async def eod_close_monitor():
                         _eod_closed_today.add(discord_id)
                         if result["success"]:
                             clear_active_trade(discord_id)
+                            pnl_per_contract = entry - current_value
                             log.info(f"EOD close executed for {discord_id} — {profit_pct:.2f}% profitable at close time")
+                            spawn_task(ac.log_trade_close(
+                                discord_id,
+                                sub.get("display_name", "Subscriber"),
+                                sub.get("email", ""),
+                                {
+                                    "short_strike": trade["short_strike"],
+                                    "long_strike": trade["long_strike"],
+                                    "contracts": trade["contracts"],
+                                    "limit_price": entry,
+                                },
+                                exit_price=current_value,
+                                pnl_per_contract=pnl_per_contract,
+                                dashboard_url=DASHBOARD_URL,
+                                dashboard_api_key=DASHBOARD_KEY,
+                            ))
                             if bot_channel:
                                 await bot_channel.send(
                                     f"🕐 **EOD Auto-Close** — {mention}\n"
@@ -1055,7 +1183,7 @@ async def on_message(message: discord.Message):
                 if 'invalid_grant' in err_str.lower() or 'invalid jwt' in err_str.lower():
                     # Disable auto-trade via backend + send push + email
                     if discord_id:
-                        asyncio.create_task(notify_credentials_expired(discord_id, display_name))
+                        spawn_task(notify_credentials_expired(discord_id, display_name))
                     else:
                         try:
                             await ac.update_subscriber(discord_id, {'auto_trade': False})
@@ -1094,7 +1222,7 @@ async def on_message(message: discord.Message):
 
                 # Push notification to iPhone
                 if discord_id:
-                    asyncio.create_task(push_user(
+                    spawn_task(push_user(
                         discord_id,
                         title="⚡ Trade Placed — Midas",
                         message=f"NDX {result['short_strike']}/{result['long_strike']} Put Spread · {result['contracts']} contract{'s' if result['contracts'] != 1 else ''} · Limit ${result['limit_price']:.2f}",
@@ -1118,7 +1246,7 @@ async def on_message(message: discord.Message):
                 # ── Poll for fill confirmation (up to 60s) ────────────────────
                 order_id = result.get("order_id")
                 if order_id and discord_id:
-                    asyncio.create_task(
+                    spawn_task(
                         _poll_fill(executor, order_id, discord_id, display_name, acct, result, bot_channel)
                     )
 
