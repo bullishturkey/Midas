@@ -388,11 +388,41 @@ class UserTradeExecutor:
         balances = await self.account.get_balances(self.session)
         return float(balances.net_liquidating_value)
 
-    async def get_0dte_option(self, strike: int, option_type: str):
-        from tastytrade.instruments import Option, NestedOptionChain
-        today  = date.today().strftime("%Y-%m-%d")
+    async def _get_0dte_chain(self):
+        """
+        Return the NestedOptionChain entry that actually supports daily 0DTE
+        expirations (PM-settled), not the AM-settled monthly chain.
+
+        NDX lists multiple option classes under the same root symbol — the
+        AM-settled monthly (expiration_type 'Monthly' / settlement_type 'AM')
+        and the PM-settled daily/weekly chain used for 0DTE credit spreads.
+        Previously the code took chains[0] blindly, which on some days could
+        resolve to the AM-settled chain lacking today's expiration (symptom:
+        "Could not fetch 0DTE contracts") or ambiguous duplicate rows feeding
+        illegal same-symbol close orders.
+        """
+        from tastytrade.instruments import NestedOptionChain
         chains = await NestedOptionChain.get(self.session, UNDERLYING)
-        chain  = chains[0]
+        if not chains:
+            return None
+        # Prefer a chain explicitly marked PM-settled; fall back to one whose
+        # expirations actually include today (covers SDKs where settlement_type
+        # isn't populated), then finally chains[0] as a last resort.
+        today = date.today().strftime("%Y-%m-%d")
+        for c in chains:
+            if str(getattr(c, "settlement_type", "") or "").upper() == "PM":
+                return c
+        for c in chains:
+            if any(str(e.expiration_date) == today for e in c.expirations):
+                return c
+        return chains[0]
+
+    async def get_0dte_option(self, strike: int, option_type: str):
+        from tastytrade.instruments import Option
+        today  = date.today().strftime("%Y-%m-%d")
+        chain  = await self._get_0dte_chain()
+        if not chain:
+            return None
         for expiration in chain.expirations:
             if str(expiration.expiration_date) == today:
                 for s in expiration.strikes:
@@ -451,11 +481,12 @@ class UserTradeExecutor:
         Fetch the current mid-price of the spread (short_put - long_put).
         Returns net debit to close (positive = cost to close). Returns None if unavailable.
         """
-        from tastytrade.instruments import Option, NestedOptionChain
+        from tastytrade.instruments import Option
         try:
             today = date.today().strftime("%Y-%m-%d")
-            chains = await NestedOptionChain.get(self.session, UNDERLYING)
-            chain = chains[0]
+            chain = await self._get_0dte_chain()
+            if not chain:
+                return None
             short_bid = short_ask = long_bid = long_ask = None
             for expiration in chain.expirations:
                 if str(expiration.expiration_date) != today:
@@ -608,6 +639,11 @@ def register_active_trade(discord_id: str, short_strike: int, long_strike: int,
 
 def clear_active_trade(discord_id: str):
     _active_trades.pop(discord_id, None)
+
+
+# ── Alert dedup registry ────────────────────────────────────────────────────────
+_processed_alert_ids: set = set()
+_processed_alert_date = None
 
 
 # ── Account Balance Sync Monitor ────────────────────────────────────────────────
@@ -1131,6 +1167,21 @@ async def on_message(message: discord.Message):
 
     # ── Alert channel — execute trades ────────────────────────────────────────
     if message.channel.id == ALERT_CHANNEL_ID:
+        # ── Dedup guard ─────────────────────────────────────────────────────
+        # Discord gateway reconnects / event replays can redeliver the same
+        # message, which would otherwise fire a full trade pass for every
+        # subscriber a second time and over-leverage every account. Track
+        # processed message IDs for the trading day and skip repeats.
+        global _processed_alert_ids, _processed_alert_date
+        today_date = datetime.now(timezone.utc).date()
+        if _processed_alert_date != today_date:
+            _processed_alert_ids.clear()
+            _processed_alert_date = today_date
+        if message.id in _processed_alert_ids:
+            log.warning(f"Duplicate alert message {message.id} — already processed today, skipping to avoid double trade.")
+            return
+        _processed_alert_ids.add(message.id)
+
         # Check both message content and embeds for NDX price
         content_to_parse = message.content or ''
         if not content_to_parse and message.embeds:
@@ -1159,6 +1210,18 @@ async def on_message(message: discord.Message):
             tt_refresh   = sub.get("tastytrade_refresh_token")
             if not auto_trade or not tt_secret or not tt_refresh:
                 continue
+            # ── Already-open-trade guard ───────────────────────────────────
+            # Never open a second spread on top of one already registered —
+            # a second alert firing (dup message, correction, manual re-send)
+            # must not stack an extra position and double the account's risk.
+            discord_id = sub.get("discord_id")
+            if discord_id and discord_id in _active_trades:
+                existing = _active_trades[discord_id]
+                log.warning(
+                    f"Skipping trade for {discord_id} — already has an open position "
+                    f"({existing.get('short_strike')}/{existing.get('long_strike')})."
+                )
+                continue
             eligible.append(sub)
 
         if not eligible:
@@ -1177,6 +1240,20 @@ async def on_message(message: discord.Message):
             try:
                 executor = UserTradeExecutor(tt_secret, tt_refresh)
                 await executor.connect(account_number=account_num)
+                # ── Broker-truth duplicate guard ───────────────────────────
+                # _active_trades is in-memory only and is wiped on a bot
+                # restart, so also check the account's real open option
+                # positions right before placing — this is the backstop
+                # that survives restarts and prevents stacking a second
+                # spread (over-leveraging the account) if memory state was lost.
+                existing_positions = await executor.get_open_option_positions()
+                if existing_positions:
+                    log.warning(
+                        f"Skipping trade for {discord_id} ({display_name}) — "
+                        f"account already has {len(existing_positions)} open option "
+                        f"position(s). Refusing to stack a second spread."
+                    )
+                    return
                 result = await executor.place_spread(ndx_price, limit_price)
             except Exception as e:
                 err_str = str(e)
