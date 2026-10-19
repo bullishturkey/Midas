@@ -208,6 +208,25 @@ def is_market_open() -> bool:
     return open_ <= now <= close_
 
 
+# ── Active Window (Midas should be idle outside this, weekdays only) ───────────
+# Greg's ask: don't hammer Render/Tastytrade outside trading hours. Midas "wakes"
+# at 6:20 AM PT and "sleeps" at 12:50 PM PT, and does nothing on weekends.
+ACTIVE_START_HOUR, ACTIVE_START_MIN = 6, 20
+ACTIVE_END_HOUR,   ACTIVE_END_MIN   = 12, 50
+
+def is_active_window() -> bool:
+    """True only Mon-Fri, 6:20 AM - 12:50 PM Pacific. All background monitors
+    (balance sync, profit target, EOD close) should no-op outside this window
+    so Midas isn't polling Tastytrade/Render around the clock."""
+    import pytz
+    pt = datetime.now(pytz.timezone("America/Los_Angeles"))
+    if pt.weekday() >= 5:
+        return False
+    start = pt.replace(hour=ACTIVE_START_HOUR, minute=ACTIVE_START_MIN, second=0, microsecond=0)
+    end   = pt.replace(hour=ACTIVE_END_HOUR,   minute=ACTIVE_END_MIN,   second=0, microsecond=0)
+    return start <= pt <= end
+
+
 # ── Position Sizing & Strike Logic ────────────────────────────────────────────
 def get_contract_count(balance: float) -> int:
     if balance < 7_000:
@@ -654,10 +673,15 @@ _processed_alert_date = None
 BALANCE_SYNC_INTERVAL_S = 300  # 5 minutes
 
 async def balance_sync_monitor():
-    """Every 5 min, refresh account_balance + account_number for every subscriber
-    with valid Tastytrade credentials, regardless of auto_trade/trade activity."""
+    """Every 5 min during the active window (6:20 AM - 12:50 PM PT, weekdays),
+    refresh account_balance + account_number for every subscriber with valid
+    Tastytrade credentials. Outside that window it sleeps in long increments
+    instead of hitting Alerts Command / Tastytrade every few minutes."""
     await asyncio.sleep(30)
     while True:
+        if not is_active_window():
+            await asyncio.sleep(600)  # check back in 10 min, no API calls made
+            continue
         try:
             subscribers = await ac.get_subscribers()
             for sub in subscribers:
@@ -696,7 +720,7 @@ async def profit_target_monitor():
     await asyncio.sleep(30)  # brief startup delay
     while True:
         try:
-            if is_market_open():
+            if is_active_window():
                 subscribers = await ac.get_subscribers()
                 for sub in subscribers:
                     discord_id = sub.get("discord_id")
@@ -791,7 +815,7 @@ async def profit_target_monitor():
                         log.warning(f"Profit target check error for {discord_id}: {e}")
         except Exception as e:
             log.warning(f"profit_target_monitor loop error: {e}")
-        await asyncio.sleep(60)
+        await asyncio.sleep(60 if is_active_window() else 600)
 
 
 # ── EOD Auto-Close Monitor ─────────────────────────────────────────────────────
@@ -906,7 +930,7 @@ async def eod_close_monitor():
                         log.warning(f"EOD close error for {discord_id}: {e}")
         except Exception as e:
             log.warning(f"eod_close_monitor loop error: {e}")
-        await asyncio.sleep(30)
+        await asyncio.sleep(30 if is_active_window() else 600)
 
 
 @bot.event
