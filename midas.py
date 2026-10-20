@@ -92,7 +92,10 @@ DASHBOARD_KEY = os.getenv("NDX_DASHBOARD_MIDAS_KEY", "")
 
 async def _poll_fill(executor, order_id, discord_id: str, display_name: str,
                      account: str, trade_result: dict, bot_channel):
-    """Poll Tastytrade every 5s for up to 90s until the order fills, then post confirmation."""
+    """Poll Tastytrade every 5s for up to 90s until the order fills, then post
+    confirmation. Owns `executor` for its whole lifetime (it's the last consumer
+    after trade_one hands off) — always closes its httpx session on exit so we
+    don't leak a connection pool per trade."""
     try:
         mention = f"<@{discord_id}>"
         for _ in range(18):  # 18 × 5s = 90s max
@@ -130,6 +133,8 @@ async def _poll_fill(executor, order_id, discord_id: str, display_name: str,
             )
     except Exception as e:
         log.warning(f"_poll_fill failed for {discord_id}: {e}")
+    finally:
+        await executor.close()
 
 async def push_user(discord_id: str, title: str, message: str, data: dict = None):
     """Send a push notification to a user's iPhone via the Alert Command App backend."""
@@ -402,6 +407,19 @@ class UserTradeExecutor:
             ) if account_number else accounts[0]
         else:
             self.account = accounts
+
+    async def close(self):
+        """Close the underlying httpx client. Every UserTradeExecutor creates its
+        own Session (and therefore its own httpx.AsyncClient connection pool) —
+        without closing these, Render's process accumulates open connections/file
+        descriptors until it OOMs. Call this in a finally block after any use."""
+        if self.session is not None:
+            client = getattr(self.session, "_client", None)
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
 
     async def get_balance(self) -> float:
         balances = await self.account.get_balances(self.session)
@@ -692,13 +710,16 @@ async def balance_sync_monitor():
                     continue
                 try:
                     executor = UserTradeExecutor(tt_secret, tt_refresh)
-                    await executor.connect(account_number=sub.get("account_number"))
-                    balance = await executor.get_balance()
-                    await ac.update_subscriber(discord_id, {
-                        "account_balance": balance,
-                        "account_number": executor.account.account_number,
-                        "balance_updated_at": datetime.now(timezone.utc).isoformat(),
-                    })
+                    try:
+                        await executor.connect(account_number=sub.get("account_number"))
+                        balance = await executor.get_balance()
+                        await ac.update_subscriber(discord_id, {
+                            "account_balance": balance,
+                            "account_number": executor.account.account_number,
+                            "balance_updated_at": datetime.now(timezone.utc).isoformat(),
+                        })
+                    finally:
+                        await executor.close()
                 except Exception as e:
                     err_str = str(e)
                     if 'invalid_grant' in err_str.lower() or 'invalid jwt' in err_str.lower():
@@ -730,6 +751,7 @@ async def profit_target_monitor():
                     trade = _active_trades.get(discord_id)
                     if not trade:
                         continue
+                    executor = None
                     try:
                         executor = UserTradeExecutor(
                             sub.get("tastytrade_client_secret"),
@@ -813,6 +835,9 @@ async def profit_target_monitor():
                                     )
                     except Exception as e:
                         log.warning(f"Profit target check error for {discord_id}: {e}")
+                    finally:
+                        if executor is not None:
+                            await executor.close()
         except Exception as e:
             log.warning(f"profit_target_monitor loop error: {e}")
         await asyncio.sleep(60 if is_active_window() else 600)
@@ -864,6 +889,7 @@ async def eod_close_monitor():
                     trade = _active_trades.get(discord_id)
                     if not trade:
                         continue
+                    executor = None
                     try:
                         executor = UserTradeExecutor(
                             sub.get("tastytrade_client_secret"),
@@ -928,6 +954,9 @@ async def eod_close_monitor():
                                 )
                     except Exception as e:
                         log.warning(f"EOD close error for {discord_id}: {e}")
+                    finally:
+                        if executor is not None:
+                            await executor.close()
         except Exception as e:
             log.warning(f"eod_close_monitor loop error: {e}")
         await asyncio.sleep(30 if is_active_window() else 600)
@@ -1261,6 +1290,7 @@ async def on_message(message: discord.Message):
             display_name = sub.get("display_name", "Subscriber")
             mention      = f"<@{discord_id}>" if discord_id else display_name
 
+            executor = None
             try:
                 executor = UserTradeExecutor(tt_secret, tt_refresh)
                 await executor.connect(account_number=account_num)
@@ -1350,6 +1380,10 @@ async def on_message(message: discord.Message):
                     spawn_task(
                         _poll_fill(executor, order_id, discord_id, display_name, acct, result, bot_channel)
                     )
+                else:
+                    # No fill-poll consumer will take ownership — close here.
+                    if executor is not None:
+                        await executor.close()
 
             else:
                 if bot_channel:
@@ -1357,6 +1391,8 @@ async def on_message(message: discord.Message):
                         f"⚠️ **Trade Failed** — **{display_name}** ({mention}) · `{account_num or '—'}`\n"
                         f"`{result.get('error')}`"
                     )
+                if executor is not None:
+                    await executor.close()
 
         # Fire all trades at the same moment
         await asyncio.gather(*[trade_one(sub) for sub in eligible], return_exceptions=True)
