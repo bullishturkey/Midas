@@ -785,7 +785,7 @@ async def profit_target_monitor():
                                 ))
                                 log.info(f"Profit milestone {milestone}% alert sent to {discord_id}")
 
-                        if current_value <= target_value:
+                        if current_value <= target_value and not trade.get("close_failed_alerted", False):
                             result = await executor.close_spread(
                                 trade["short_strike"], trade["long_strike"], trade["contracts"]
                             )
@@ -826,13 +826,24 @@ async def profit_target_monitor():
                                         f"Estimated P&L: **+${profit:,.2f}**"
                                     )
                             else:
+                                # ── Suppress repeat alert spam ─────────────────
+                                # Without a cap, this fires the same close attempt
+                                # (and the same Discord ping) every 60s until the
+                                # error resolves — invalid_order_price won't fix
+                                # itself on a bare retry. Alert once per trade,
+                                # then go quiet (trade stays registered so it's
+                                # still visible/trackable, just not re-attempted
+                                # or re-alerted every minute).
+                                already_alerted = trade.get("close_failed_alerted", False)
                                 log.warning(f"Profit target close failed for {discord_id}: {result.get('error')}")
-                                if bot_channel:
+                                if bot_channel and not already_alerted:
                                     await bot_channel.send(
                                         f"⚠️ **Profit Target Close Failed** — {mention}\n"
                                         f"Could not close spread automatically: `{result.get('error')}`\n"
-                                        f"Please close manually in Tastytrade."
+                                        f"Please close manually in Tastytrade. (Further retries suppressed — will not re-alert until manually resolved.)"
                                     )
+                                if discord_id in _active_trades:
+                                    _active_trades[discord_id]["close_failed_alerted"] = True
                     except Exception as e:
                         log.warning(f"Profit target check error for {discord_id}: {e}")
                     finally:
